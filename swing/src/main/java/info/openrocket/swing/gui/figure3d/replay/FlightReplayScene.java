@@ -6,6 +6,7 @@ import info.openrocket.core.rocketcomponent.Parachute;
 import info.openrocket.core.rocketcomponent.RecoveryDevice;
 import info.openrocket.core.rocketcomponent.Rocket;
 import info.openrocket.core.rocketcomponent.RocketComponent;
+import info.openrocket.core.rocketcomponent.ShockCord;
 import info.openrocket.core.rocketcomponent.SymmetricComponent;
 import info.openrocket.core.simulation.FlightDataType;
 import info.openrocket.core.simulation.FlightEvent;
@@ -70,11 +71,11 @@ final class FlightReplayScene {
 	private static final float TRAIL_WIDTH_PIXELS = 1.6f;
 	private static final float CORD_WIDTH_PIXELS = 1.2f;
 	private static final float CORD_MIN_RADIUS = 0.005f * S;
-	private static final double CANOPY_INFLATION_TIME = 0.8;
 	private static final double OBSERVER_EYE_HEIGHT = 1.7;
 	private static final float CHASE_FOV = (float) Math.toRadians(40);
 	private static final float ONBOARD_FOV = (float) Math.toRadians(75);
 	private static final double GROUND_FRAME_FILL = 0.15;
+	private static final double GROUND_RIG_FILL = 0.45;
 	private static final double EPSILON = 1e-4;
 
 	// sRGB colours. Trail and canopy use the Okabe-Ito palette.
@@ -158,6 +159,8 @@ final class FlightReplayScene {
 	private CameraMode appliedMode;
 	private ReplayBody followedBody;
 	private float groundFov = (float) Math.toRadians(20);
+	/** Span the chase camera's distance was last fitted to, metres. */
+	private double chaseSpan = 1;
 
 	/**
 	 * @param branches       flight data branches; the first is the main rocket, the others are
@@ -222,7 +225,8 @@ final class FlightReplayScene {
 			for (FlightReplayData.Event deployment : data.getDeployments()) {
 				RecoveryDevice device = (RecoveryDevice) deployment.source();
 				if (ownerOf(device) == i) {
-					devices.add(new ReplayBody.DeviceJoint(deployment.time(), device, stationOf(device, front, aft)));
+					devices.add(new ReplayBody.DeviceJoint(deployment.time(), device, stationOf(device, front, aft),
+							cordLength(device)));
 				}
 			}
 			bodies.add(new ReplayBody(data, front, aft, radii[i] > 0 ? radii[i] : bodyRadius, devices,
@@ -292,6 +296,19 @@ final class FlightReplayScene {
 			return tubeAft;
 		}
 		return tubeFront;
+	}
+
+	/** Length of the shock cord packed with a recovery device, metres, or NaN when the design has none. */
+	static double cordLength(RecoveryDevice device) {
+		RocketComponent parent = device.getParent();
+		if (parent != null) {
+			for (RocketComponent sibling : parent.getChildren()) {
+				if (sibling instanceof ShockCord cord && cord.getCordLength() > 0) {
+					return cord.getCordLength();
+				}
+			}
+		}
+		return Double.NaN;
 	}
 
 	/** Which body and section a rocket component moves with. */
@@ -395,7 +412,9 @@ final class FlightReplayScene {
 		if (Double.isNaN(start)) {
 			start = data.getStartTime();
 		}
-		double end = data.getEndTime();
+		// The trail stops at touchdown; the parts settling afterwards leave none.
+		double end = Double.isNaN(data.getGroundHitTime()) ? data.getEndTime()
+				: Math.min(data.getEndTime(), data.getGroundHitTime());
 		List<SceneObject> added = new ArrayList<>();
 		if (end <= start) {
 			return added;
@@ -461,7 +480,7 @@ final class FlightReplayScene {
 		List<SceneObject> pool = new ArrayList<>();
 		Mesh cylinder = ReplayMeshes.unitCylinder(6);
 		Appearance3D appearance = unlit(SHROUD_LINE);
-		for (int i = 0; i < body.getSectionCount() + 1; i++) {
+		for (int i = 0; i < body.getCordCapacity(); i++) {
 			SceneObject cord = new SceneObject(cylinder, new Vector3f(), appearance);
 			cord.setSelectable(false);
 			hide(cord);
@@ -489,7 +508,7 @@ final class FlightReplayScene {
 		for (FlightReplayData.Event deployment : measured.getDeployments()) {
 			if (deployment.source() instanceof RecoveryDevice device && ownerOf(device) == 0) {
 				devices.add(new ReplayBody.DeviceJoint(deployment.time(), device,
-						stationOf(device, main.getFront(), main.getAft())));
+						stationOf(device, main.getFront(), main.getAft()), cordLength(device)));
 			}
 		}
 		ReplayBody body = new ReplayBody(measured, main.getFront(), main.getAft(), main.getRadius(), devices,
@@ -861,18 +880,14 @@ final class FlightReplayScene {
 				}
 				continue;
 			}
-			double inflate = ReplayBody.smoothstep((t - canopy.deployTime()) / CANOPY_INFLATION_TIME);
+			double inflate = ReplayBody.smoothstep((t - canopy.deployTime()) / RecoveryDynamics.INFLATION_TIME);
 			double scale = 0.15 + 0.85 * inflate;
-			double groundHit = body.getData().getGroundHitTime();
-			double collapse = Double.isNaN(groundHit) ? 0 : ReplayBody.smoothstep((t - groundHit) / 1.5);
+			float collapse = body.getCanopyCollapse(canopy.deployment());
 			Vector3f offset = new Vector3f(body.getSitePivot()).sub(origin).add(position);
-			// After touchdown the canopy deflates and falls over beyond the nose, clear of the pieces.
-			Vector3f heading = body.heading();
-			Vector3f fallAxis = new Vector3f(heading).cross(0, 1, 0).normalize();
+			// Once down, the canopy lies where it fell and goes flat.
 			Matrix4f model = new Matrix4f()
 					.translation(offset)
-					.scale(1, (float) (1 - 0.85 * collapse), 1)	// flatten onto the ground
-					.rotate(new Quaternionf().rotateAxis((float) (-collapse * Math.toRadians(85)), fallAxis))
+					.scale(1, 1 - 0.85f * collapse, 1)
 					.rotate(body.getCanopyRotation(canopy.deployment()))
 					.scale((float) scale);
 			for (SceneObject part : canopy.parts()) {
@@ -891,19 +906,29 @@ final class FlightReplayScene {
 		Vector3f target = new Vector3f(followed.getSitePivot()).sub(origin);
 		switch (mode) {
 			case CHASE -> {
+				// Pull back to keep canopies and cords in view, and in again once they are down,
+				// keeping any zoom the viewer chose.
+				double span = Math.max(Math.max(1.6 * length, 0.6), 1.3 * followed.getExtent());
 				if (entered) {
 					camera.resetViewOffset();
 					camera.setFieldOfView(CHASE_FOV);
 					camera.setAngleX(0.55f);
 					camera.setAngleY(0.22f);
-					camera.setDistance((float) (Math.max(1.6 * length, 0.6) * S / Math.tan(CHASE_FOV / 2)));
+					camera.setDistance((float) (span * S / Math.tan(CHASE_FOV / 2)));
+					chaseSpan = span;
+				} else {
+					double eased = chaseSpan + (span - chaseSpan) * Math.min(1, 1.5 * frameSeconds);
+					camera.setDistance((float) (camera.getDistance() * eased / chaseSpan));
+					chaseSpan = eased;
 				}
 				camera.setCenterOfInterest(target);
 			}
 			case GROUND -> {
 				Vector3f eye = observerSitePosition().sub(origin);
 				float distance = eye.distance(target);
-				double rocketSpan = Math.max(length, 0.3) * S / GROUND_FRAME_FILL;
+				// The rocket alone fills a little of the frame; under canopy, the whole rig fills more.
+				double rocketSpan = Math.max(Math.max(length, 0.3) / GROUND_FRAME_FILL,
+						2 * followed.getExtent() / GROUND_RIG_FILL) * S;
 				float fov = (float) Math.min(Math.toRadians(50),
 						Math.max(Math.toRadians(1.5), 2 * Math.atan(rocketSpan / (2 * distance))));
 				groundFov = entered ? fov : groundFov + (fov - groundFov) * Math.min(1f, 3f * frameSeconds);

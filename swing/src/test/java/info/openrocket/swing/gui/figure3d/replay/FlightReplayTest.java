@@ -170,16 +170,63 @@ class FlightReplayTest extends BaseTestCase {
 	}
 
 	@Test
-	void piecesRestOnTheGroundAfterLanding() {
+	void airframeSeparatesWithoutAJumpAndFliesApartQuickly() {
 		FlightReplayScene scene = new FlightReplayScene(List.of(data), rocket, 1.0, -27.0, 153.0);
-		double landed = data.getGroundHitTime() + 1;
-		double radius = first(rocket, BodyTube.class).getOuterRadius();
+		NoseCone nose = first(rocket, NoseCone.class);
+		BodyTube tube = first(rocket, BodyTube.class);
+		double joint = nose.getLength();
+		double deployment = data.getFirstDeploymentTime();
+
+		for (RocketComponent component : List.of(nose, tube)) {
+			double x = component.getComponentLocations()[0].getX();
+			Vector3f before = sitePoint(scene, component, deployment - 1e-4, x);
+			Vector3f after = sitePoint(scene, component, deployment + 1e-4, x);
+			assertTrue(before.distance(after) / S < 0.02,
+					component.getName() + " jumped " + before.distance(after) / S + " m as the parachute deployed");
+		}
+
+		// The ejection charge throws the nose clear to the end of its cord in a fraction of a
+		// second, rather than easing it out over a slow blend.
+		float widest = 0;
+		for (double t = deployment; t < deployment + 0.3; t += 0.02) {
+			widest = Math.max(widest, sitePoint(scene, nose, t, joint).distance(sitePoint(scene, tube, t, joint)));
+		}
+		float settled = sitePoint(scene, nose, deployment + 5, joint).distance(sitePoint(scene, tube, deployment + 5, joint));
+		assertTrue(widest > settled, "gap " + widest / S + " m within 0.3 s, " + settled / S + " m after 5 s");
+	}
+
+	@Test
+	void piecesHangBelowTheCanopy() {
+		FlightReplayScene scene = new FlightReplayScene(List.of(data), rocket, 1.0, -27.0, 153.0);
+		ReplayBody body = scene.getBodies().get(0);
+		double t = 0.5 * (data.getFirstDeploymentTime() + data.getGroundHitTime());
+		body.update(t);
+		float knot = body.getSitePivot().y + body.getCanopyPosition(0).y;
+		Vector3f lines = body.getCanopyRotation(0).transform(new Vector3f(0, 1, 0));
+		assertTrue(lines.y > 0.8f, "canopy axis " + lines);
 		for (RocketComponent component : List.of(first(rocket, NoseCone.class), first(rocket, BodyTube.class))) {
 			double front = component.getComponentLocations()[0].getX();
 			for (double x : new double[] { front, front + component.getLength() }) {
-				float height = sitePoint(scene, component, landed, x).y / S;
-				assertTrue(height > -1e-3 && height < 3 * radius, component.getName() + " at height " + height);
+				float height = sitePoint(scene, component, t, x).y;
+				assertTrue(height < knot, component.getName() + " above the canopy's knot");
 			}
+		}
+	}
+
+	@Test
+	void piecesRestOnTheGroundAfterLanding() {
+		FlightReplayScene scene = new FlightReplayScene(List.of(data), rocket, 1.0, -27.0, 153.0);
+		double landed = data.getGroundHitTime() + 5;
+		double radius = scene.getBodies().get(0).getRadius();
+		for (RocketComponent component : List.of(first(rocket, NoseCone.class), first(rocket, BodyTube.class))) {
+			double front = component.getComponentLocations()[0].getX();
+			float lowest = Float.MAX_VALUE;
+			for (double x : new double[] { front, front + component.getLength() }) {
+				float height = sitePoint(scene, component, landed, x).y / S;
+				assertTrue(height > radius - 1e-3, component.getName() + " below the ground at " + height);
+				lowest = Math.min(lowest, height);
+			}
+			assertEquals(radius, lowest, 0.01, component.getName() + " lies on the ground");
 		}
 	}
 

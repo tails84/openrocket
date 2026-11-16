@@ -30,7 +30,8 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 	private static final SharedCanvasRenderScheduler RENDER_SCHEDULER = SharedCanvasRenderScheduler.getInstance();
 	private static final long RENDER_SHUTDOWN_TIMEOUT_MS = 2_000;
 	/** Keep playing a moment past touchdown so the canopy can settle. */
-	private static final double LANDING_HOLD_SECONDS = 2.0;
+	/** Time to keep playing after touchdown, while the pieces settle and the canopies come down. */
+	private static final double LANDING_HOLD_SECONDS = 6.0;
 	/** Longest step the clock takes in one frame, so a stalled window does not jump ahead. */
 	private static final float MAX_FRAME_SECONDS = 0.5f;
 

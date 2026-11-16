@@ -1,6 +1,8 @@
 package info.openrocket.swing.gui.figure3d.replay;
 
+import info.openrocket.core.rocketcomponent.Parachute;
 import info.openrocket.core.rocketcomponent.RecoveryDevice;
+import info.openrocket.core.rocketcomponent.Streamer;
 import info.openrocket.core.simulation.FlightDataType;
 import info.openrocket.core.simulation.FlightEvent;
 import info.openrocket.swing.gui.figure3d.constants.RenderingConstants;
@@ -10,7 +12,6 @@ import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 
 /**
@@ -18,36 +19,35 @@ import java.util.List;
  * following its own flight data branch.
  *
  * <p>Until its first recovery deployment the body flies as one rigid piece with the recorded
- * attitude. Each deployment opens the airframe at the front of the tube the device is packed in.
- * The simulation tracks the body as a single point, so the pieces are laid out for display: they
- * hang on shock cords below the latest canopy, swaying gently, and lie down side by side once they
- * reach the ground.</p>
+ * attitude. Each deployment opens the airframe at the front of the tube the device is packed in,
+ * and from then on {@link RecoveryDynamics} moves the pieces, shock cords and canopies.</p>
  *
  * <p>Coordinates: rocket (model) coordinates run aft along +X from the nose tip, in engine units.
  * The body frame is the replay world shifted so the body's pivot point is at the origin.</p>
  */
 final class ReplayBody {
 	private static final float S = RenderingConstants.WORLD_SCALE;
-	private static final double SETTLE_TIME = 2.0;
 	private static final double LANDING_SETTLE_HEIGHT = 3.0;
-	private static final float CORD_SPLAY = (float) Math.toRadians(25);
-	private static final float PIECE_SPLAY = (float) Math.toRadians(12);
-	private static final float CANOPY_LEAN = (float) Math.toRadians(30);
 	private static final double EPSILON = 1e-4;
+	/** Shock cord length for a design without one, as a multiple of the body length, and its limits. */
+	private static final double CORD_PER_LENGTH = 2.0;
+	private static final double SHORTEST_CORD = 0.6;
+	private static final double LONGEST_CORD = 8.0;
+	/** A filled round canopy turns slowly about its axis, radians per second. */
+	private static final double SPIN_RATE = 0.35;
+	/** Straight pieces each shock cord is drawn with, so a slack cord can sag. */
+	private static final int CORD_PIECES = 4;
+	private static final double GRAVITY = 9.81;
 
-	/** A recovery device and where it opens the airframe. */
-	record DeviceJoint(double time, RecoveryDevice device, double station) {
+	/**
+	 * A recovery device and where it opens the airframe.
+	 *
+	 * @param cordLength length of the shock cord across that joint, metres, or NaN when not known
+	 */
+	record DeviceJoint(double time, RecoveryDevice device, double station, double cordLength) {
 	}
 
-	/** One end face of a section. */
-	private record Anchor(int section, boolean aftFace) {
-	}
-
-	private record Deployment(double time, RecoveryDevice device, int joint) {
-	}
-
-	/** Sections {@code first..last}, inclusive, that hang together. */
-	private record Piece(int first, int last) {
+	private record Deployment(double time, RecoveryDevice device, int joint, double cord) {
 	}
 
 	private final FlightReplayData data;
@@ -63,6 +63,8 @@ final class ReplayBody {
 	private final double launchPivot;
 	/** At each stage separation: time, pivot step along the body (metres), and that step in the world. */
 	private final List<double[]> pivotShifts = new ArrayList<>();
+	private final RecoveryDynamics dynamics;
+	private final RecoveryDynamics.Sample sample = new RecoveryDynamics.Sample();
 
 	// Results of the last update(), in the body frame.
 	private final Matrix4f[] sectionMatrices;
@@ -72,6 +74,8 @@ final class ReplayBody {
 	private final List<Vector3f[]> cords = new ArrayList<>();
 	private Vector3f[] canopyPositions = new Vector3f[0];
 	private Quaternionf[] canopyRotations = new Quaternionf[0];
+	private float[] canopyCollapse = new float[0];
+	private double extent;
 
 	/**
 	 * @param data           flight data branch the body follows
@@ -97,9 +101,11 @@ final class ReplayBody {
 				.sorted()
 				.distinct()
 				.toArray();
+		double defaultCord = Math.max(SHORTEST_CORD, Math.min(LONGEST_CORD, CORD_PER_LENGTH * (aft - front)));
 		devices.stream()
 				.sorted((a, b) -> Double.compare(a.time(), b.time()))
-				.forEach(d -> deployments.add(new Deployment(d.time(), d.device(), jointOf(d.station()))));
+				.forEach(d -> deployments.add(new Deployment(d.time(), d.device(), jointOf(d.station()),
+						d.cordLength() > 0 ? d.cordLength() : defaultCord)));
 
 		this.sectionMatrices = new Matrix4f[stations.length + 1];
 		for (int i = 0; i < sectionMatrices.length; i++) {
@@ -120,6 +126,7 @@ final class ReplayBody {
 				}
 			}
 		}
+		this.dynamics = deployments.isEmpty() ? null : buildDynamics();
 	}
 
 	// ---------- queries ----------
@@ -147,6 +154,11 @@ final class ReplayBody {
 
 	int getSectionCount() {
 		return sectionMatrices.length;
+	}
+
+	/** Most straight pieces {@link #getCords()} can hold. */
+	int getCordCapacity() {
+		return 2 * CORD_PIECES * (sectionMatrices.length + 1);
 	}
 
 	/** Section holding the rocket-coordinate position {@code x}, in metres. */
@@ -195,18 +207,28 @@ final class ReplayBody {
 		return sectionMatrices[section];
 	}
 
-	/** Shock cords as (from, to) pairs in the body frame, from the last update. */
+	/** Straight pieces of shock cord as (from, to) pairs in the body frame, from the last update. */
 	List<Vector3f[]> getCords() {
 		return cords;
 	}
 
-	/** Canopy origin for the i-th deployed device, body frame, or null while it is packed. */
+	/** Farthest any part reaches from the pivot, metres, from the last update. */
+	double getExtent() {
+		return extent;
+	}
+
+	/** Canopy origin, where its shroud lines meet, for the i-th deployed device, body frame, or null while it is packed. */
 	Vector3f getCanopyPosition(int deployment) {
 		return deployment < canopyPositions.length ? canopyPositions[deployment] : null;
 	}
 
 	Quaternionf getCanopyRotation(int deployment) {
 		return canopyRotations[deployment];
+	}
+
+	/** How far the i-th canopy has fallen flat on the ground, 0 to 1, from the last update. */
+	float getCanopyCollapse(int deployment) {
+		return deployment < canopyCollapse.length ? canopyCollapse[deployment] : 0;
 	}
 
 	// ---------- rigid flight ----------
@@ -240,245 +262,252 @@ final class ReplayBody {
 		return pivot;
 	}
 
+	/** Where the rigid body's pivot is at time {@code t}, launch-site frame without the pad offset. */
+	private Vector3f rigidPivot(double t) {
+		Vector3f pivot = data.getPose().getPosition(t).add(0, (float) (rigidHeightOffset(t) * S), 0);
+		// The simulation lands the body at zero altitude, so let the height part of a stage
+		// separation's shift go as it touches down.
+		float settle = (float) landingSettle(t);
+		for (double[] shift : pivotShifts) {
+			if (t >= shift[0]) {
+				pivot.add((float) shift[2], (float) shift[3] * settle, (float) shift[4]);
+			}
+		}
+		return pivot;
+	}
+
+	/**
+	 * The point the simulation tracks once the recovery devices are out, launch-site frame without
+	 * the pad offset. It keeps the launch height of the CG all the way down, so the parts reach the
+	 * ground on their own at their own speed.
+	 */
+	private Vector3f trackedPoint(double t) {
+		Vector3f point = data.getPose().getPosition(t).add(0, (float) (launchCgHeight * S), 0);
+		for (double[] shift : pivotShifts) {
+			if (t >= shift[0]) {
+				point.add((float) shift[2], (float) shift[3], (float) shift[4]);
+			}
+		}
+		return point;
+	}
+
 	// ---------- per frame ----------
 
 	/** Works out where every section, canopy and cord is at time {@code t}. */
 	void update(double t) {
-		int state = 0;
-		while (state < deployments.size() && deployments.get(state).time() <= t) {
-			state++;
-		}
-
-		double offset;
 		cords.clear();
-		if (state == 0) {
+		if (dynamics == null || !(t >= dynamics.getStart())) {
 			Matrix4f rigid = rigidMatrix(t);
 			for (Matrix4f matrix : sectionMatrices) {
 				matrix.set(rigid);
 			}
-			offset = rigidHeightOffset(t);
+			sitePivot.set(rigidPivot(t)).add(siteOffset);
 			canopyPositions = new Vector3f[0];
 			canopyRotations = new Quaternionf[0];
-		} else {
-			double since = t - deployments.get(state - 1).time();
-			float blend = (float) smoothstep(since / SETTLE_TIME);
-			Vector3f[] centres = new Vector3f[sectionMatrices.length];
-			Quaternionf[] rotations = new Quaternionf[sectionMatrices.length];
-			if (state == 1) {
-				rigidPoses(deployments.get(0).time(), centres, rotations);
-			} else {
-				hangingPoses(state - 1, t, centres, rotations);
-			}
-			Vector3f[] targetCentres = new Vector3f[centres.length];
-			Quaternionf[] targetRotations = new Quaternionf[centres.length];
-			hangingPoses(state, t, targetCentres, targetRotations);
-			blendPoses(centres, rotations, targetCentres, targetRotations, blend);
-
-			float landing = (float) (1 - landingSettle(t));
-			if (landing > 0) {
-				landedPoses(state, targetCentres, targetRotations);
-				blendPoses(centres, rotations, targetCentres, targetRotations, landing);
-			}
-			for (int i = 0; i < sectionMatrices.length; i++) {
-				double middle = 0.5 * (sectionFront(i) + sectionAft(i));
-				sectionMatrices[i].translation(centres[i]).rotate(rotations[i])
-						.translate((float) (-middle * S), 0, 0);
-			}
-
-			offset = Math.max(radius, -lowestPoint() / S + radius);
-			if (state == 1) {
-				offset = lerp(rigidHeightOffset(t), offset, blend);
-			}
-			placeCanopiesAndCords(state, blend, t);
+			canopyCollapse = new float[0];
+			double pivot = pivot(t);
+			extent = Math.max(pivot - front, aft - pivot);
+			return;
 		}
 
-		Vector3f position = data.getPose().getPosition(t);
-		sitePivot.set(position).add(0, (float) (offset * S), 0).add(siteOffset);
-		// The simulation lands the body at zero altitude, so let the height part of the shift go
-		// as it touches down.
-		float settle = (float) landingSettle(t);
-		for (double[] shift : pivotShifts) {
-			if (t >= shift[0]) {
-				sitePivot.add((float) shift[2], (float) shift[3] * settle, (float) shift[4]);
+		RecoveryDynamics.Sample now = dynamics.sample(t, sample);
+		RecoveryDynamics.Layout layout = now.layout;
+		double[] x = now.position;
+		double[] centre = now.centre;
+		sitePivot.set((float) (centre[0] * S), (float) (centre[1] * S), (float) (centre[2] * S)).add(siteOffset);
+		extent = 0;
+		for (int p = 0; p < layout.particles(); p++) {
+			double dx = x[3 * p] - centre[0], dy = x[3 * p + 1] - centre[1], dz = x[3 * p + 2] - centre[2];
+			extent = Math.max(extent, Math.sqrt(dx * dx + dy * dy + dz * dz));
+		}
+
+		for (int r = 0; r < layout.rods(); r++) {
+			int a = layout.rodFront[r], b = layout.rodAft[r];
+			Vector3f along = new Vector3f((float) (x[3 * b] - x[3 * a]), (float) (x[3 * b + 1] - x[3 * a + 1]),
+					(float) (x[3 * b + 2] - x[3 * a + 2])).normalize();
+			Vector3f up = new Vector3f((float) now.up[3 * r], (float) now.up[3 * r + 1], (float) now.up[3 * r + 2]);
+			up.sub(new Vector3f(along).mul(up.dot(along))).normalize();
+			Vector3f side = new Vector3f(along).cross(up);
+			Vector3f at = bodyPoint(x, a, centre);
+			double pieceFront = layout.rodFirst[r] == 0 ? front : stations[layout.rodFirst[r] - 1];
+			for (int i = layout.rodFirst[r]; i <= layout.rodLast[r]; i++) {
+				sectionMatrices[i].set(along.x, along.y, along.z, 0, up.x, up.y, up.z, 0, side.x, side.y, side.z, 0,
+						at.x, at.y, at.z, 1).translate((float) (-pieceFront * S), 0, 0);
 			}
+		}
+
+		float groundHeight = (float) (-centre[1] * S);
+		for (int l = layout.cordStart; l < layout.lineStart; l++) {
+			addCord(bodyPoint(x, layout.linkA[l], centre), bodyPoint(x, layout.linkB[l], centre),
+					layout.linkLength[l], groundHeight);
+		}
+
+		int open = layout.open;
+		canopyPositions = new Vector3f[open];
+		canopyRotations = new Quaternionf[open];
+		canopyCollapse = new float[open];
+		for (int d = 0; d < open; d++) {
+			Vector3f knot = bodyPoint(x, layout.knot[d], centre);
+			Vector3f direction = bodyPoint(x, layout.canopy[d], centre).sub(knot);
+			if (direction.lengthSquared() < 1e-8f) {
+				direction.set(0, 1, 0);
+			}
+			double down = dynamics.touchdown(d);
+			double turning = (Double.isNaN(down) ? t : Math.min(t, down)) - deployments.get(d).time();
+			float spin = (float) (SPIN_RATE * turning * (d % 2 == 0 ? 1 : -1));
+			canopyPositions[d] = knot;
+			canopyRotations[d] = new Quaternionf().rotateTo(new Vector3f(0, 1, 0), direction.normalize()).rotateY(spin);
+			canopyCollapse[d] = (float) dynamics.collapse(d, t);
 		}
 	}
 
-	private void rigidPoses(double t, Vector3f[] centres, Quaternionf[] rotations) {
-		Quaternionf rotation = rigidRotation(t);
-		double pivot = pivot(t);
-		for (int i = 0; i < centres.length; i++) {
-			double middle = 0.5 * (sectionFront(i) + sectionAft(i));
-			rotations[i] = new Quaternionf(rotation);
-			centres[i] = rotation.transform(new Vector3f((float) ((middle - pivot) * S), 0, 0));
+	/** A particle's position in the body frame, engine units. */
+	private static Vector3f bodyPoint(double[] x, int particle, double[] centre) {
+		return new Vector3f((float) ((x[3 * particle] - centre[0]) * S), (float) ((x[3 * particle + 1] - centre[1]) * S),
+				(float) ((x[3 * particle + 2] - centre[2]) * S));
+	}
+
+	/** A shock cord between two points, sagging when it is slack, kept above the ground. */
+	private void addCord(Vector3f from, Vector3f to, double length, float groundHeight) {
+		double span = from.distance(to) / S;
+		float sag = span < length ? (float) (0.5 * Math.sqrt(length * length - span * span) * S) : 0;
+		float lowest = groundHeight + 0.003f * S;
+		Vector3f previous = from;
+		for (int k = 1; k <= CORD_PIECES; k++) {
+			float u = (float) k / CORD_PIECES;
+			Vector3f point = new Vector3f(from).lerp(to, u);
+			point.y = Math.max(lowest, point.y - sag * 4 * u * (1 - u));
+			cords.add(new Vector3f[] { previous, point });
+			previous = point;
 		}
+	}
+
+	// ---------- recovery ----------
+
+	private RecoveryDynamics buildDynamics() {
+		double[] faces = new double[stations.length + 2];
+		faces[0] = front;
+		System.arraycopy(stations, 0, faces, 1, stations.length);
+		faces[faces.length - 1] = aft;
+		List<RecoveryDynamics.Device> devices = new ArrayList<>();
+		for (Deployment deployment : deployments) {
+			RecoveryDevice device = deployment.device();
+			double dragArea = device.getCD() * device.getArea();
+			double mass = device.getComponentMass();
+			devices.add(new RecoveryDynamics.Device(deployment.time(), deployment.joint(),
+					Double.isFinite(dragArea) && dragArea > 0 ? dragArea : 0.05,
+					Double.isFinite(mass) && mass > 0 ? mass : 0.02, reach(device), deployment.cord()));
+		}
+		RecoveryDynamics.Course course = new RecoveryDynamics.Course() {
+			@Override
+			public void centre(double t, double[] out) {
+				set(out, trackedPoint(t).div(S));
+			}
+
+			@Override
+			public void wind(double t, double[] out) {
+				windAt(t, out);
+			}
+
+			@Override
+			public double airDensity(double t) {
+				return densityAt(t);
+			}
+
+			@Override
+			public void rigidPoint(double station, double t, double[] out) {
+				Vector3f along = rigidRotation(t).transform(new Vector3f((float) ((station - pivot(t)) * S), 0, 0));
+				set(out, rigidPivot(t).add(along).div(S));
+			}
+
+			@Override
+			public void rigidUp(double t, double[] out) {
+				set(out, rigidRotation(t).transform(new Vector3f(0, 1, 0)));
+			}
+		};
+		return new RecoveryDynamics(faces, radius, devices, bodyMass(devices), course, data.getEndTime(),
+				data.getGroundHitTime());
+	}
+
+	private static void set(double[] out, Vector3f value) {
+		out[0] = value.x;
+		out[1] = value.y;
+		out[2] = value.z;
+	}
+
+	/** Distance from where the shroud lines meet to the canopy's centre of drag, metres. */
+	private static double reach(RecoveryDevice device) {
+		if (device instanceof Parachute parachute) {
+			ReplayMeshes.CanopyShape shape = ReplayMeshes.CanopyShape.of(parachute.getDiameter(),
+					parachute.getLineLength(), parachute.getLineCount());
+			return (shape.rimHeight() + 0.5 * shape.domeHeight()) / S;
+		}
+		if (device instanceof Streamer streamer) {
+			return Math.max(0.1, 0.5 * streamer.getStripLength());
+		}
+		return 0.3;
 	}
 
 	/**
-	 * Lays the pieces out on shock cords below the latest canopy, which holds the body pivot.
-	 * Pieces forward of that canopy's joint hang on one side, nose down; pieces aft of it hang on
-	 * the other side, nose up.
+	 * Mass of the body when the first device opens: from the flight data, or for a measured flight
+	 * without it, the mass its canopies hold up at the rate it came down.
 	 */
-	private void hangingPoses(int state, double t, Vector3f[] centres, Quaternionf[] rotations) {
-		int anchor = deployments.get(state - 1).joint();
-		List<Piece> pieces = pieces(state);
-		Vector3f heading = heading();
-		float roll = (float) data.getRollAngle(getFirstDeploymentTime());
-		Quaternionf sway = sway(t);
-		float length = (float) ((aft - front) * S);
-
-		List<Piece> forward = new ArrayList<>();
-		List<Piece> aftward = new ArrayList<>();
-		for (Piece piece : pieces) {
-			(piece.last() < anchor ? forward : aftward).add(piece);
+	private double bodyMass(List<RecoveryDynamics.Device> devices) {
+		double first = deployments.get(0).time();
+		double recorded = data.getValue(FlightDataType.TYPE_MASS, first);
+		if (Double.isFinite(recorded) && recorded > 0) {
+			return recorded;
 		}
-		Collections.reverse(forward);	// start next to the anchor
-		boolean twoSides = !forward.isEmpty() && !aftward.isEmpty();
-		hangChain(forward, -1, twoSides, heading, roll, length, sway, centres, rotations);
-		hangChain(aftward, 1, twoSides, heading, roll, length, sway, centres, rotations);
-	}
-
-	private void hangChain(List<Piece> chain, int side, boolean splay, Vector3f heading, float roll,
-			float bodyLength, Quaternionf sway, Vector3f[] centres, Quaternionf[] rotations) {
-		float cordAngle = splay ? CORD_SPLAY : 0;
-		float pieceAngle = splay ? PIECE_SPLAY : 0;
-		Vector3f cordDirection = new Vector3f(heading).mul(side * (float) Math.sin(cordAngle))
-				.add(0, (float) -Math.cos(cordAngle), 0);
-		Vector3f down = new Vector3f(heading).mul(side * (float) Math.sin(pieceAngle))
-				.add(0, (float) -Math.cos(pieceAngle), 0);
-		float cord = Math.max(0.35f * bodyLength, 0.3f * S);
-		float gap = Math.max(0.3f * bodyLength, 0.3f * S);
-
-		Vector3f top = new Vector3f(cordDirection).mul(cord);
-		for (Piece piece : chain) {
-			double pieceFront = sectionFront(piece.first());
-			double pieceAft = sectionAft(piece.last());
-			float pieceLength = (float) ((pieceAft - pieceFront) * S);
-			// Forward pieces hang from their aft end, nose down; aft pieces from their front, nose up.
-			Vector3f nose = side < 0 ? new Vector3f(down) : new Vector3f(down).negate();
-			Quaternionf rotation = new Quaternionf(sway).mul(noseRotation(nose, roll));
-			Vector3f pieceCentre = new Vector3f(down).mul(pieceLength / 2).add(top);
-			sway.transform(pieceCentre);
-			double pieceMiddle = 0.5 * (pieceFront + pieceAft);
-			for (int i = piece.first(); i <= piece.last(); i++) {
-				double middle = 0.5 * (sectionFront(i) + sectionAft(i));
-				rotations[i] = new Quaternionf(rotation);
-				centres[i] = rotation.transform(new Vector3f((float) ((middle - pieceMiddle) * S), 0, 0))
-						.add(pieceCentre);
+		double last = deployments.get(deployments.size() - 1).time();
+		double end = Double.isFinite(data.getGroundHitTime()) ? data.getGroundHitTime() : data.getEndTime();
+		double from = last + 0.5 * (end - last);
+		double to = end - 0.1 * (end - last);
+		double drop = data.getValue(FlightDataType.TYPE_ALTITUDE, from) - data.getValue(FlightDataType.TYPE_ALTITUDE, to);
+		double rate = drop / (to - from);
+		if (to - from > 1 && Double.isFinite(rate) && rate > 0.5) {
+			double dragArea = 0;
+			for (RecoveryDynamics.Device device : devices) {
+				dragArea += device.dragArea();
 			}
-			top.add(new Vector3f(down).mul(pieceLength + gap));
+			double mass = 0.5 * densityAt(0.5 * (from + to)) * dragArea * rate * rate / GRAVITY;
+			return Math.max(0.05, Math.min(500, mass));
 		}
+		return Math.max(0.05, 400 * Math.PI * radius * radius * (aft - front));
 	}
 
-	/** Pieces lying on the ground in airframe order, nose towards the drift heading. */
-	private void landedPoses(int state, Vector3f[] centres, Quaternionf[] rotations) {
-		List<Piece> pieces = pieces(state);
-		Vector3f heading = heading();
-		Quaternionf rotation = noseRotation(heading, (float) data.getRollAngle(getFirstDeploymentTime()));
-		double bodyMiddle = 0.5 * (front + aft);
-		float gap = (float) (0.2 * (aft - front) * S);
-		for (int p = 0; p < pieces.size(); p++) {
-			Piece piece = pieces.get(p);
-			float along = (float) (-(0.5 * (sectionFront(piece.first()) + sectionAft(piece.last())) - bodyMiddle) * S)
-					+ gap * ((pieces.size() - 1) / 2f - p);
-			double pieceMiddle = 0.5 * (sectionFront(piece.first()) + sectionAft(piece.last()));
-			Vector3f pieceCentre = new Vector3f(heading).mul(along);
-			for (int i = piece.first(); i <= piece.last(); i++) {
-				double middle = 0.5 * (sectionFront(i) + sectionAft(i));
-				rotations[i] = new Quaternionf(rotation);
-				centres[i] = rotation.transform(new Vector3f((float) ((middle - pieceMiddle) * S), 0, 0))
-						.add(pieceCentre);
-			}
+	/** Wind from the flight data, or for data without it, the drift of the flight itself. */
+	private void windAt(double t, double[] out) {
+		double speed = data.getValue(FlightDataType.TYPE_WIND_VELOCITY, t);
+		double from = data.getValue(FlightDataType.TYPE_WIND_DIRECTION, t);
+		if (Double.isFinite(speed) && Double.isFinite(from)) {
+			// Blowing from a bearing: towards the opposite one. Engine axes: +X east, -Z north.
+			out[0] = -speed * Math.sin(from);
+			out[1] = 0;
+			out[2] = speed * Math.cos(from);
+			return;
 		}
+		double a = Math.max(data.getStartTime(), t - 0.5);
+		double b = Math.min(data.getEndTime(), t + 0.5);
+		if (b - a < 0.1) {
+			Arrays.fill(out, 0);
+			return;
+		}
+		Vector3f drift = data.getPose().getPosition(b).sub(data.getPose().getPosition(a)).div((float) ((b - a) * S));
+		out[0] = drift.x;
+		out[1] = 0;
+		out[2] = drift.z;
 	}
 
-	private void placeCanopiesAndCords(int state, float blend, double t) {
-		int anchor = deployments.get(state - 1).joint();
-		for (int joint : separatedJoints(state)) {
-			if (joint == anchor) {
-				if (joint > 0) {
-					cords.add(new Vector3f[] { new Vector3f(), facePoint(new Anchor(joint - 1, true)) });
-				}
-				if (joint <= stations.length) {
-					cords.add(new Vector3f[] { new Vector3f(), facePoint(new Anchor(joint, false)) });
-				}
-			} else if (joint > 0 && joint <= stations.length) {
-				cords.add(new Vector3f[] { facePoint(new Anchor(joint - 1, true)), facePoint(new Anchor(joint, false)) });
-			}
+	private double densityAt(double t) {
+		double density = data.getValue(FlightDataType.TYPE_AIR_DENSITY, t);
+		if (Double.isFinite(density) && density > 0) {
+			return density;
 		}
-
-		canopyPositions = new Vector3f[state];
-		canopyRotations = new Quaternionf[state];
-		Quaternionf sway = sway(t);
-		Vector3f heading = heading();
-		Vector3f leanAxis = new Vector3f(heading).cross(0, 1, 0).normalize();
-		for (int d = 0; d < state; d++) {
-			Vector3f now = canopyPosition(d, state);
-			if (d < state - 1 && state > 1) {
-				now = canopyPosition(d, state - 1).lerp(now, blend);
-			}
-			canopyPositions[d] = now;
-			int joint = deployments.get(d).joint();
-			// Lean away from the anchor, towards the side the canopy's pieces hang on.
-			float lean = joint == anchor ? 0 : (joint < anchor ? CANOPY_LEAN : -CANOPY_LEAN);
-			canopyRotations[d] = new Quaternionf(sway).mul(new Quaternionf().rotateAxis(lean, leanAxis));
-		}
-	}
-
-	/** A canopy on the anchor joint holds the pivot; others ride on the cord at their own joint. */
-	private Vector3f canopyPosition(int deployment, int state) {
-		int joint = deployments.get(deployment).joint();
-		if (joint == deployments.get(state - 1).joint()) {
-			return new Vector3f();
-		}
-		if (joint <= 0) {
-			return facePoint(new Anchor(0, false));
-		}
-		if (joint > stations.length) {
-			return facePoint(new Anchor(stations.length, true));
-		}
-		return facePoint(new Anchor(joint - 1, true)).add(facePoint(new Anchor(joint, false))).mul(0.5f);
-	}
-
-	private Vector3f facePoint(Anchor anchor) {
-		double x = anchor.aftFace() ? sectionAft(anchor.section()) : sectionFront(anchor.section());
-		return sectionMatrices[anchor.section()].transformPosition(new Vector3f((float) (x * S), 0, 0));
-	}
-
-	private float lowestPoint() {
-		float lowest = 0;
-		for (int i = 0; i < sectionMatrices.length; i++) {
-			lowest = Math.min(lowest, facePoint(new Anchor(i, false)).y);
-			lowest = Math.min(lowest, facePoint(new Anchor(i, true)).y);
-		}
-		return lowest;
+		double altitude = data.getValue(FlightDataType.TYPE_ALTITUDE, t);
+		return 1.225 * Math.exp(-(Double.isFinite(altitude) ? Math.max(0, altitude) : 0) / 9000);
 	}
 
 	// ---------- helpers ----------
-
-	private List<Piece> pieces(int state) {
-		List<Integer> separated = separatedJoints(state);
-		List<Piece> pieces = new ArrayList<>();
-		int first = 0;
-		for (int section = 1; section <= stations.length; section++) {
-			if (separated.contains(section)) {
-				pieces.add(new Piece(first, section - 1));
-				first = section;
-			}
-		}
-		pieces.add(new Piece(first, stations.length));
-		return pieces;
-	}
-
-	private List<Integer> separatedJoints(int state) {
-		List<Integer> joints = new ArrayList<>();
-		for (int d = 0; d < state; d++) {
-			if (!joints.contains(deployments.get(d).joint())) {
-				joints.add(deployments.get(d).joint());
-			}
-		}
-		return joints;
-	}
 
 	/** Joint number for a station: 0 at the front, n + 1 at the aft end, otherwise before section j. */
 	private int jointOf(double station) {
@@ -493,45 +522,6 @@ final class ReplayBody {
 			index = -index - 1;
 		}
 		return index + 1;
-	}
-
-	private double sectionFront(int section) {
-		return section == 0 ? front : stations[section - 1];
-	}
-
-	private double sectionAft(int section) {
-		return section == stations.length ? aft : stations[section];
-	}
-
-	/** Horizontal direction of the nose when the first recovery device opened. */
-	Vector3f heading() {
-		Vector3f axis = data.getPose().getAxisDirection(getFirstDeploymentTime());
-		Vector3f heading = axis == null ? new Vector3f() : new Vector3f(axis.x, 0, axis.z);
-		if (heading.lengthSquared() < 1e-6f) {
-			heading.set(1, 0, 0);
-		}
-		return heading.normalize();
-	}
-
-	private static Quaternionf noseRotation(Vector3f nose, float roll) {
-		return new Quaternionf().rotateTo(new Vector3f(0, 1, 0), nose)
-				.rotateZ((float) (-Math.PI / 2))
-				.rotateX(roll);
-	}
-
-	/** A slow pendulum swing under the canopy. */
-	private static Quaternionf sway(double t) {
-		return new Quaternionf()
-				.rotateZ((float) Math.toRadians(3 * Math.sin(2 * Math.PI * t / 4.3 + 1)))
-				.rotateX((float) Math.toRadians(4 * Math.sin(2 * Math.PI * t / 3.1)));
-	}
-
-	private static void blendPoses(Vector3f[] centres, Quaternionf[] rotations,
-			Vector3f[] targetCentres, Quaternionf[] targetRotations, float blend) {
-		for (int i = 0; i < centres.length; i++) {
-			centres[i].lerp(targetCentres[i], blend);
-			rotations[i].slerp(targetRotations[i], blend);
-		}
 	}
 
 	/** Height of the pivot above the simulated position before anything deploys, metres. */
@@ -556,9 +546,5 @@ final class ReplayBody {
 	static double smoothstep(double x) {
 		double c = Math.max(0, Math.min(1, x));
 		return c * c * (3 - 2 * c);
-	}
-
-	private static double lerp(double a, double b, double f) {
-		return a + (b - a) * f;
 	}
 }
