@@ -22,9 +22,8 @@ final class LaunchSiteImages {
 	/** Close-up grass: pixels across and the metres one tile covers. */
 	static final int DETAIL_PIXELS = 1024;
 	static final double DETAIL_TILE = 3.0;
-	/** The paddock around the site, one image without repeats: pixels across and metres covered. */
+	/** The paddock around the site, one image without repeats: pixels across. */
 	static final int FIELD_PIXELS = 2048;
-	static final double FIELD_SPAN = 2048;
 	/** The country beyond the paddock, repeating: pixels across and metres one tile covers. */
 	static final int FAR_PIXELS = 1024;
 	static final double FAR_TILE = 1536;
@@ -46,6 +45,7 @@ final class LaunchSiteImages {
 	private static final float[] RUT = { 0.47f, 0.39f, 0.29f };
 	private static final float[] WATER = { 0.22f, 0.31f, 0.33f };
 	private static final float[] MUD = { 0.50f, 0.43f, 0.31f };
+	private static final float[] TUSSOCK_SHADE = { 0.42f, 0.42f, 0.25f };
 
 	/**
 	 * Where the paddock's features are, in metres on the site's row (r) and depth (d) axes.
@@ -58,34 +58,47 @@ final class LaunchSiteImages {
 	 * @param shadowD     the same along d
 	 * @param clearRadius radius around the site the paddock shows as plain grass, where the
 	 *                    close-up grass takes over
+	 * @param fieldSpan   metres the paddock image covers
+	 * @param survey      what the ground is like round a known launch site, or null for a made-up paddock
+	 * @param houses      per house: r, d, width and length, metres
+	 * @param toSun       unit vector to the sun as (r, up, d)
 	 */
 	record Plan(long seed, List<double[]> trees, double[][] track, double[] dam, double shadowR, double shadowD,
-			double clearRadius) {
+			double clearRadius, double fieldSpan, SiteSurvey survey, List<double[]> houses, float[] toSun) {
 	}
 
-	/** The images, as TGA file data. */
-	record Images(ByteBuffer longGrass, ByteBuffer mownGrass, ByteBuffer field, ByteBuffer far, ByteBuffer blades) {
+	/** The images, as TGA file data; the country over a surveyed site's hills, or null. */
+	record Images(ByteBuffer longGrass, ByteBuffer mownGrass, ByteBuffer field, ByteBuffer far, ByteBuffer blades,
+			ByteBuffer terrain) {
 	}
 
 	private LaunchSiteImages() {
 	}
 
 	static Images paint(Plan plan) {
-		BufferedImage longGrass = longGrass(plan.seed());
-		float[] mean = mean(longGrass);
-		return new Images(tga(longGrass), tga(mownGrass(plan.seed() + 1)), tga(field(plan, mean)), tga(far(plan.seed())),
-				tga(blades()));
+		// A surveyed site's long grass is the drier tussock of a grazed paddock.
+		float dry = plan.survey() != null ? 0.45f : 0;
+		BufferedImage longGrass = longGrass(plan.seed(), dry);
+		// Drawn from a distance the close-up grass looks a shade darker than its average.
+		float[] mean = scale(mean(longGrass), 0.94f);
+		if (plan.survey() != null) {
+			return new Images(tga(longGrass), tga(mownGrass(plan.seed() + 1, dry)), tga(SurveyImages.field(plan, mean)),
+					tga(far(plan.seed())), tga(blades(dry)), tga(SurveyImages.terrain(plan, plan.toSun())));
+		}
+		return new Images(tga(longGrass), tga(mownGrass(plan.seed() + 1, dry)), tga(field(plan, mean)), tga(far(plan.seed())),
+				tga(blades(dry)), null);
 	}
 
 	// ---------- close-up grass ----------
 
 	/** Long grass from above: blades in every direction over dark gaps, a few of them dry. */
-	private static BufferedImage longGrass(long seed) {
+	/** @param dry how far the colours lean from green towards dry tussock, 0..1 */
+	private static BufferedImage longGrass(long seed, float dry) {
 		int n = DETAIL_PIXELS;
 		BufferedImage image = new BufferedImage(n, n, BufferedImage.TYPE_INT_RGB);
 		Graphics2D g = image.createGraphics();
 		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-		g.setColor(color(scale(GRASS_DARK, 0.85f)));
+		g.setColor(color(mix(scale(GRASS_DARK, 0.85f), TUSSOCK_SHADE, dry)));
 		g.fillRect(0, 0, n, n);
 		Random random = new Random(seed);
 		// Clumps: patches where the blades are lighter or darker, a few tens of centimetres across.
@@ -93,9 +106,9 @@ final class LaunchSiteImages {
 		for (int i = 0; i < 70_000; i++) {
 			double x = random.nextDouble() * n, y = random.nextDouble() * n;
 			double clump = clumps.periodic(x / n * 12, y / n * 12);
-			float[] colour = random.nextDouble() < 0.12 + 0.2 * clump ? GRASS_DRY
+			float[] colour = random.nextDouble() < 0.12 + 0.2 * clump + 0.35 * dry ? GRASS_DRY
 					: mix(GRASS_DARK, GRASS_FRESH, (float) (0.25 + 0.6 * random.nextDouble() * (0.6 + 0.6 * clump)));
-			colour = scale(colour, (float) (0.85 + 0.25 * random.nextDouble()));
+			colour = scale(mix(colour, TUSSOCK_SHADE, 0.35f * dry), (float) (0.85 + 0.25 * random.nextDouble()));
 			double angle = random.nextDouble() * Math.PI * 2;
 			double length = 5 + random.nextDouble() * 12;
 			strokeWrapped(g, n, x, y, x + Math.cos(angle) * length, y + Math.sin(angle) * length,
@@ -106,19 +119,21 @@ final class LaunchSiteImages {
 	}
 
 	/** Mown grass: short speckled blades, and the light and dark stripes the mower leaves. */
-	private static BufferedImage mownGrass(long seed) {
+	/** @param dry how far the colours lean from green towards dry tussock, 0..1 */
+	private static BufferedImage mownGrass(long seed, float dry) {
 		int n = DETAIL_PIXELS;
 		BufferedImage image = new BufferedImage(n, n, BufferedImage.TYPE_INT_RGB);
 		Graphics2D g = image.createGraphics();
 		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-		g.setColor(color(scale(MOWN, 0.9f)));
+		g.setColor(color(mix(scale(MOWN, 0.9f), TUSSOCK_SHADE, 0.5f * dry)));
 		g.fillRect(0, 0, n, n);
 		Random random = new Random(seed);
 		for (int i = 0; i < 90_000; i++) {
 			double x = random.nextDouble() * n, y = random.nextDouble() * n;
-			float[] colour = random.nextDouble() < 0.06 ? mix(MOWN, GRASS_DRY, 0.6f)
+			float[] colour = random.nextDouble() < 0.06 + 0.25 * dry ? mix(MOWN, GRASS_DRY, 0.6f)
 					: scale(mix(GRASS_DARK, GRASS_FRESH, (float) (0.45 + 0.55 * random.nextDouble())),
 							(float) (0.92 + 0.16 * random.nextDouble()));
+			colour = mix(colour, TUSSOCK_SHADE, 0.3f * dry);
 			double angle = random.nextDouble() * Math.PI * 2;
 			double length = 2 + random.nextDouble() * 4;
 			strokeWrapped(g, n, x, y, x + Math.cos(angle) * length, y + Math.sin(angle) * length,
@@ -177,15 +192,16 @@ final class LaunchSiteImages {
 	/** The paddock around the site: plain grass in the middle, a track, a dam and the shade of trees. */
 	private static BufferedImage field(Plan plan, float[] centre) {
 		int n = FIELD_PIXELS;
-		double metres = FIELD_SPAN / n;
+		double span = plan.fieldSpan();
+		double metres = span / n;
 		ValueNoise[] noise = paddockNoise(plan.seed());
 		ValueNoise edge = new ValueNoise(plan.seed() + 21, 64);
 		BufferedImage image = new BufferedImage(n, n, BufferedImage.TYPE_INT_RGB);
 		double[] dam = plan.dam();
 		for (int j = 0; j < n; j++) {
-			double d = (j + 0.5) * metres - FIELD_SPAN / 2;
+			double d = (j + 0.5) * metres - span / 2;
 			for (int i = 0; i < n; i++) {
-				double r = (i + 0.5) * metres - FIELD_SPAN / 2;
+				double r = (i + 0.5) * metres - span / 2;
 				float[] colour = paddock(noise, r, d);
 				double fromSite = Math.hypot(r, d);
 				colour = mix(centre, colour,
@@ -211,14 +227,14 @@ final class LaunchSiteImages {
 			double cr = tree[0] + plan.shadowR() * tree[2];
 			double cd = tree[1] + plan.shadowD() * tree[2];
 			double radius = tree[3] * 1.15;
-			int i0 = (int) Math.floor((cr - radius - 2 + FIELD_SPAN / 2) / metres);
-			int i1 = (int) Math.ceil((cr + radius + 2 + FIELD_SPAN / 2) / metres);
-			int j0 = (int) Math.floor((cd - radius - 2 + FIELD_SPAN / 2) / metres);
-			int j1 = (int) Math.ceil((cd + radius + 2 + FIELD_SPAN / 2) / metres);
+			int i0 = (int) Math.floor((cr - radius - 2 + span / 2) / metres);
+			int i1 = (int) Math.ceil((cr + radius + 2 + span / 2) / metres);
+			int j0 = (int) Math.floor((cd - radius - 2 + span / 2) / metres);
+			int j1 = (int) Math.ceil((cd + radius + 2 + span / 2) / metres);
 			for (int j = Math.max(0, j0); j <= Math.min(n - 1, j1); j++) {
 				for (int i = Math.max(0, i0); i <= Math.min(n - 1, i1); i++) {
-					double r = (i + 0.5) * metres - FIELD_SPAN / 2;
-					double d = (j + 0.5) * metres - FIELD_SPAN / 2;
+					double r = (i + 0.5) * metres - span / 2;
+					double d = (j + 0.5) * metres - span / 2;
 					double shade = 1 - smoothstep(radius * 0.6, radius + 1.5, Math.hypot(r - cr, d - cd));
 					if (shade > 0) {
 						image.setRGB(i, j, gain(image.getRGB(i, j), (float) (1 - 0.38 * shade)));
@@ -247,7 +263,7 @@ final class LaunchSiteImages {
 	// ---------- blades and ramps ----------
 
 	/** Grass blades: one colour variant per column band, dark at the root (v = 0) to light at the tip. */
-	private static BufferedImage blades() {
+	private static BufferedImage blades(float dry) {
 		int width = BLADE_VARIANTS * 8, height = 64;
 		BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
 		float[][] tips = { GRASS_FRESH, GRASS, mix(GRASS, GRASS_DRY, 0.3f), GRASS_FRESH, GRASS_DRY,
@@ -255,7 +271,8 @@ final class LaunchSiteImages {
 		for (int v = 0; v < BLADE_VARIANTS; v++) {
 			for (int j = 0; j < height; j++) {
 				float along = (j + 0.5f) / height;
-				float[] colour = mix(scale(GRASS_DARK, 0.7f), scale(tips[v], 1.08f), (float) Math.pow(along, 0.7));
+				float[] tip = mix(tips[v], GRASS_DRY, dry * (v % 3 == 0 ? 0.9f : 0.5f));
+				float[] colour = mix(scale(GRASS_DARK, 0.7f), scale(tip, 1.08f), (float) Math.pow(along, 0.7));
 				for (int i = 0; i < 8; i++) {
 					image.setRGB(v * 8 + i, j, rgb(colour));
 				}
@@ -325,14 +342,14 @@ final class LaunchSiteImages {
 		return new Color(rgb(colour));
 	}
 
-	private static int rgb(float[] colour) {
+	static int rgb(float[] colour) {
 		int r = Math.round(Math.max(0, Math.min(1, colour[0])) * 255);
 		int g = Math.round(Math.max(0, Math.min(1, colour[1])) * 255);
 		int b = Math.round(Math.max(0, Math.min(1, colour[2])) * 255);
 		return (r << 16) | (g << 8) | b;
 	}
 
-	private static int gain(int rgb, float gain) {
+	static int gain(int rgb, float gain) {
 		int r = Math.min(255, Math.round(((rgb >> 16) & 0xFF) * gain));
 		int g = Math.min(255, Math.round(((rgb >> 8) & 0xFF) * gain));
 		int b = Math.min(255, Math.round((rgb & 0xFF) * gain));
@@ -362,7 +379,7 @@ final class LaunchSiteImages {
 	}
 
 	/** Smooth value noise on a lattice that repeats every {@code period} cells. */
-	private static final class ValueNoise {
+	static final class ValueNoise {
 		private final float[] lattice;
 		private final int period;
 

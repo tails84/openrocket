@@ -99,7 +99,7 @@ public final class FlightReplayFrame extends JFrame {
 		SimulationOptions options = simulation.getOptions();
 		FlightReplayData data = branches.get(0);
 		FlightReplayScene scene = new FlightReplayScene(branches, document.getRocket(),
-				options.getLaunchRodLength(), options.getLaunchLatitude());
+				options.getLaunchRodLength(), options.getLaunchLatitude(), options.getLaunchLongitude());
 		replayPanel = new FlightReplayPanel(document, branches, scene);
 		readout = new FlightReplayReadout(data);
 		timeline = new FlightReplayTimeline(data, replayPanel.getStartTime(), replayPanel.getEndTime(),

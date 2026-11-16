@@ -164,9 +164,11 @@ final class FlightReplayScene {
 	 *                       stages that separated from it
 	 * @param rocket         the simulated rocket, in the configuration the 3D view shows
 	 * @param railLength     launch rail length, metres
-	 * @param launchLatitude launch site latitude, degrees
+	 * @param launchLatitude  launch site latitude, degrees
+	 * @param launchLongitude launch site longitude, degrees
 	 */
-	FlightReplayScene(List<FlightReplayData> branches, Rocket rocket, double railLength, double launchLatitude) {
+	FlightReplayScene(List<FlightReplayData> branches, Rocket rocket, double railLength, double launchLatitude,
+			double launchLongitude) {
 		this.launchLatitude = launchLatitude;
 		FlightReplayData mainData = branches.get(0);
 		for (int i = 1; i < branches.size(); i++) {
@@ -231,8 +233,9 @@ final class FlightReplayScene {
 		// The site is laid out about the main pad, under the rocket's aft end.
 		Vector3f tail = new Vector3f(launchAxis).mul((float) (-(length - launchCg) * S));
 		this.padCentre = new Vector3f(tail.x, 0, tail.z);
+		// Pads in a row running east, spectators to the south, whichever way the rail leans.
 		Vector3f observer = observerDirection();
-		Vector3f row = new Vector3f(observer.z, 0, -observer.x);
+		Vector3f row = new Vector3f(1, 0, 0);
 		List<double[]> landings = new ArrayList<>();
 		for (FlightReplayData data : branches) {
 			if (!Double.isNaN(data.getGroundHitTime())) {
@@ -245,7 +248,8 @@ final class FlightReplayScene {
 		this.site = new LaunchSite(row, observer, sunDirection(), Math.max(PAD_SPACING, 1.25 * length), launchAxis,
 				Math.max(railLength, 0.3), railWidth, bodyRadius + LaunchSite.BUTTON_HEIGHT + railWidth / 2,
 				mainData.getValue(FlightDataType.TYPE_WIND_DIRECTION, liftoff),
-				mainData.getValue(FlightDataType.TYPE_WIND_VELOCITY, liftoff), landings);
+				mainData.getValue(FlightDataType.TYPE_WIND_VELOCITY, liftoff), landings,
+				SiteSurvey.near(launchLatitude, launchLongitude));
 	}
 
 	// ---------- rocket geometry ----------
@@ -942,13 +946,9 @@ final class FlightReplayScene {
 		return observerDirection().mul((float) (distance * S)).add(0, (float) (OBSERVER_EYE_HEIGHT * S), 0);
 	}
 
-	/** Level direction from the pad to the spectator, square to the launch direction. */
-	private Vector3f observerDirection() {
-		Vector3f side = new Vector3f(launchAxis.x, 0, launchAxis.z);
-		if (side.lengthSquared() < 1e-4f) {
-			return side.set(0, 0, 1);	// vertical launch: stand south of the pad
-		}
-		return side.normalize().set(-side.z, 0, side.x);
+	/** Level direction from the pads to the spectators: south, towards the road at the surveyed site. */
+	private static Vector3f observerDirection() {
+		return new Vector3f(0, 0, 1);
 	}
 
 	// ---------- helpers ----------

@@ -125,7 +125,7 @@ class FlightReplayTest extends BaseTestCase {
 
 	@Test
 	void rocketStandsOnThePadAndNosePointsUpTheRail() {
-		FlightReplayScene scene = new FlightReplayScene(List.of(data), rocket, 1.0, -27.0);
+		FlightReplayScene scene = new FlightReplayScene(List.of(data), rocket, 1.0, -27.0, 153.0);
 		double start = data.getStartTime();
 		Vector3f axis = data.getPose().getAxisDirection(start);
 		double cg = data.getValue(FlightDataType.TYPE_CG_LOCATION, start);
@@ -148,7 +148,7 @@ class FlightReplayTest extends BaseTestCase {
 
 	@Test
 	void parachuteOpensTheAirframeAtTheTubeItIsPackedIn() {
-		FlightReplayScene scene = new FlightReplayScene(List.of(data), rocket, 1.0, -27.0);
+		FlightReplayScene scene = new FlightReplayScene(List.of(data), rocket, 1.0, -27.0, 153.0);
 		NoseCone nose = first(rocket, NoseCone.class);
 		BodyTube tube = first(rocket, BodyTube.class);
 		FinSet fins = first(rocket, FinSet.class);
@@ -171,7 +171,7 @@ class FlightReplayTest extends BaseTestCase {
 
 	@Test
 	void piecesRestOnTheGroundAfterLanding() {
-		FlightReplayScene scene = new FlightReplayScene(List.of(data), rocket, 1.0, -27.0);
+		FlightReplayScene scene = new FlightReplayScene(List.of(data), rocket, 1.0, -27.0, 153.0);
 		double landed = data.getGroundHitTime() + 1;
 		double radius = first(rocket, BodyTube.class).getOuterRadius();
 		for (RocketComponent component : List.of(first(rocket, NoseCone.class), first(rocket, BodyTube.class))) {
@@ -188,7 +188,7 @@ class FlightReplayTest extends BaseTestCase {
 	@Test
 	void separatedStagesStartWhereTheyLeftTheStack() {
 		assertTrue(stagedBranches.size() > 1, "the staged rocket separates");
-		FlightReplayScene scene = new FlightReplayScene(stagedBranches, stagedRocket, 1.0, -27.0);
+		FlightReplayScene scene = new FlightReplayScene(stagedBranches, stagedRocket, 1.0, -27.0, 153.0);
 		for (int b = 1; b < scene.getBodies().size(); b++) {
 			double separation = scene.getBodies().get(b).getSeparationTime();
 			RocketComponent part = componentOf(scene, b);
@@ -203,7 +203,7 @@ class FlightReplayTest extends BaseTestCase {
 
 	@Test
 	void separatedStagesFlyTheirOwnBranch() {
-		FlightReplayScene scene = new FlightReplayScene(stagedBranches, stagedRocket, 1.0, -27.0);
+		FlightReplayScene scene = new FlightReplayScene(stagedBranches, stagedRocket, 1.0, -27.0, 153.0);
 		for (int b = 1; b < scene.getBodies().size(); b++) {
 			ReplayBody body = scene.getBodies().get(b);
 			double t = body.getData().getEndTime();

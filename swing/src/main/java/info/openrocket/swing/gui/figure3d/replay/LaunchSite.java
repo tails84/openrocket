@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CompletableFuture;
@@ -20,8 +21,9 @@ import java.util.concurrent.ExecutionException;
 
 /**
  * The launch site the replay flies from: a mown launch area with a line of pads and rails, the
- * launch control tent and a windsock, in a grass paddock with gum trees, a track and a dam, and
- * low hills on the horizon.
+ * launch control tent and a windsock. Round a site it has a survey of (see {@link SiteSurvey}) the
+ * paddocks, river, roads, woods, houses and hills are drawn where they really are; anywhere else
+ * it is a made-up grass paddock with gum trees, a track and a dam, and low hills on the horizon.
  *
  * <p>The site is laid out on its own axes: along the line of pads ("row") and from the pads
  * towards the spectators ("depth"), with the main pad at the origin. Everything is drawn unlit,
@@ -50,6 +52,15 @@ final class LaunchSite {
 	private static final double GRID = 2;
 	/** Half width of the whole ground, metres: a power of two times the grid, so squares halve evenly. */
 	private static final double GROUND_HALF = 32_768;
+	/** Half width of the paddock image, metres: made up, and round a surveyed site. */
+	private static final double FIELD_HALF = 1024;
+	private static final double SURVEYED_FIELD_HALF = 2048;
+	/** Spacing of the hills' height grid round a surveyed site, metres. */
+	private static final double TERRAIN_GRID = 128;
+	/** No trees this close to the pads at a surveyed site: the launch paddock is open, metres. */
+	private static final double OPEN_PADDOCK = 500;
+	/** Trees further from the pads than this are drawn plainer, metres. */
+	private static final double PLAIN_TREES = 700;
 
 	// sRGB colours of the scenery
 	private static final float[] RAIL = { 0.74f, 0.75f, 0.78f };
@@ -67,6 +78,10 @@ final class LaunchSite {
 	private static final float[][] LEAVES = { { 0.33f, 0.41f, 0.23f }, { 0.30f, 0.39f, 0.27f }, { 0.38f, 0.44f, 0.25f },
 			{ 0.27f, 0.35f, 0.20f }, { 0.36f, 0.42f, 0.30f }, { 0.31f, 0.37f, 0.22f } };
 	private static final float[] HILLS = { 0.38f, 0.46f, 0.40f };
+	private static final float[][] WALLS = { { 0.90f, 0.88f, 0.82f }, { 0.80f, 0.74f, 0.64f }, { 0.66f, 0.44f, 0.36f },
+			{ 0.93f, 0.93f, 0.92f } };
+	private static final float[][] ROOFS = { { 0.33f, 0.35f, 0.37f }, { 0.55f, 0.27f, 0.22f }, { 0.62f, 0.64f, 0.65f },
+			{ 0.25f, 0.33f, 0.28f }, { 0.20f, 0.21f, 0.23f } };
 	private static final float[] FENCE = { 0.52f, 0.47f, 0.40f };
 	private static final float[] WIRE = { 0.55f, 0.56f, 0.57f };
 
@@ -76,6 +91,10 @@ final class LaunchSite {
 
 	/** A gum tree: base position along row and depth, height, canopy radius and trunk radius, metres. */
 	private record Tree(double r, double d, double height, double canopy, double trunk, int variant) {
+	}
+
+	/** A house: centre along row and depth, width and length, metres, turn about the vertical, colours. */
+	private record House(double r, double d, double width, double length, double yaw, int walls, int roof) {
 	}
 
 	private final Vector3f row;
@@ -89,6 +108,10 @@ final class LaunchSite {
 	private final double windFrom;
 	private final double windSpeed;
 	private final List<Tree> trees = new ArrayList<>();
+	private final List<House> houses = new ArrayList<>();
+	/** What the ground is like round a known launch site, or null for a made-up paddock. */
+	private final SiteSurvey survey;
+	private final double fieldHalf;
 	private final double[][] track;
 	private final double[] dam;
 	private final double[] mown;
@@ -111,9 +134,14 @@ final class LaunchSite {
 	 * @param windFrom   bearing the wind blows from, radians clockwise from north, or NaN for calm
 	 * @param windSpeed  wind speed at the ground, m/s
 	 * @param landings   where things come down, as (r, d) in metres, to get close-up grass too
+	 * @param survey     the ground round a known launch site, or null for a made-up paddock; a
+	 *                   surveyed site expects row to point east and depth south
 	 */
 	LaunchSite(Vector3f row, Vector3f depth, Vector3f toSun, double padSpacing, Vector3f railAxis, double railLength,
-			double railWidth, double railOffset, double windFrom, double windSpeed, List<double[]> landings) {
+			double railWidth, double railOffset, double windFrom, double windSpeed, List<double[]> landings,
+			SiteSurvey survey) {
+		this.survey = survey;
+		this.fieldHalf = survey != null ? SURVEYED_FIELD_HALF : FIELD_HALF;
 		this.row = new Vector3f(row).normalize();
 		this.depth = new Vector3f(depth).normalize();
 		this.toSun = new Vector3f(toSun).normalize();
@@ -131,8 +159,10 @@ final class LaunchSite {
 		this.mown = new double[] { snap(first, -1), snap(last, 1), -8, 30 };
 		this.landings = new ArrayList<>();
 		patches.add(new double[] { -NEAR_HALF, NEAR_HALF, -NEAR_HALF, NEAR_HALF });
+		// Past a surveyed site's paddock image the hills take over, which have no close-up grass.
+		double reach = (survey != null ? fieldHalf : GROUND_HALF) - LANDING_HALF;
 		for (double[] landing : landings) {
-			if (Math.abs(landing[0]) < GROUND_HALF - LANDING_HALF && Math.abs(landing[1]) < GROUND_HALF - LANDING_HALF) {
+			if (Math.abs(landing[0]) < reach && Math.abs(landing[1]) < reach) {
 				this.landings.add(landing);
 				patches.add(new double[] { snap(landing[0] - LANDING_HALF, -1), snap(landing[0] + LANDING_HALF, 1),
 						snap(landing[1] - LANDING_HALF, -1), snap(landing[1] + LANDING_HALF, 1) });
@@ -142,11 +172,21 @@ final class LaunchSite {
 		this.track = new double[][] { { -1100, 420 }, { -760, 330 }, { -420, 240 }, { -180, 150 }, { -40, 110 },
 				{ 120, 96 }, { 330, 130 }, { 600, 230 }, { 1100, 260 } };
 		this.dam = new double[] { 310, -370, 24 };
-		plantTrees();
+		if (survey != null) {
+			plantSurveyedTrees();
+			buildHouses();
+		} else {
+			plantTrees();
+		}
 
 		Vector2f shadow = new Vector2f(-this.toSun.dot(this.row), -this.toSun.dot(this.depth)).div(this.toSun.y);
+		List<double[]> houseShadows = new ArrayList<>();
+		for (House house : houses) {
+			houseShadows.add(new double[] { house.r(), house.d(), house.width(), house.length() });
+		}
+		float[] sun = { this.toSun.dot(this.row), this.toSun.y, this.toSun.dot(this.depth) };
 		LaunchSiteImages.Plan plan = new LaunchSiteImages.Plan(SEED, treeShadows(), track, dam, shadow.x, shadow.y,
-				NEAR_HALF + 5);
+				survey != null ? NEAR_HALF * 0.75 : NEAR_HALF + 5, 2 * fieldHalf, survey, houseShadows, sun);
 		this.images = CompletableFuture.supplyAsync(() -> LaunchSiteImages.paint(plan));
 	}
 
@@ -193,6 +233,69 @@ final class LaunchSite {
 				random.nextInt(LEAVES.length)));
 	}
 
+	/**
+	 * Trees where the survey has them: thick in the woods, along the river banks and the creeks,
+	 * in gardens, and a few out in the paddocks, but none in the open launch paddock.
+	 */
+	private void plantSurveyedTrees() {
+		Random random = new Random(SEED + 17);
+		double step = 9;
+		for (double north = -fieldHalf; north < fieldHalf; north += step) {
+			for (double east = -fieldHalf; east < fieldHalf; east += step) {
+				double e = east + random.nextDouble() * step, n = north + random.nextDouble() * step;
+				int kind = survey.nearClass(e, n);
+				if (kind == SiteSurvey.WATER || kind == SiteSurvey.ROAD || Math.hypot(e, n) < OPEN_PADDOCK) {
+					continue;
+				}
+				double chance = switch (kind) {
+					case SiteSurvey.WOOD -> 0.55;
+					case SiteSurvey.RESIDENTIAL -> 0.10;
+					case SiteSurvey.GULLY -> 0.2;
+					default -> 0.0015;
+				};
+				boolean bank = false;
+				for (double[] offset : new double[][] { { 12, 0 }, { -12, 0 }, { 0, 12 }, { 0, -12 } }) {
+					bank |= survey.nearClass(e + offset[0], n + offset[1]) == SiteSurvey.WATER;
+				}
+				if (bank) {
+					chance = Math.max(chance, 0.35);
+				}
+				if (random.nextDouble() >= chance) {
+					continue;
+				}
+				double height = kind == SiteSurvey.RESIDENTIAL ? 6 + random.nextDouble() * 6
+						: bank ? 14 + random.nextDouble() * 10 : 9 + random.nextDouble() * 10;
+				trees.add(new Tree(e, -n, height, height * (0.2 + random.nextDouble() * 0.12), 0.15 + height * 0.018,
+						random.nextInt(LEAVES.length)));
+			}
+		}
+	}
+
+	/** Houses on their blocks where the survey has homes, clear of the streets. */
+	private void buildHouses() {
+		Random random = new Random(SEED + 19);
+		double step = 34;
+		for (double north = -fieldHalf; north < fieldHalf; north += step) {
+			for (double east = -fieldHalf; east < fieldHalf; east += step) {
+				double e = east + step / 2 + (random.nextDouble() - 0.5) * 10;
+				double n = north + step / 2 + (random.nextDouble() - 0.5) * 10;
+				if (survey.nearClass(e, n) != SiteSurvey.RESIDENTIAL || random.nextDouble() > 0.6) {
+					continue;
+				}
+				boolean street = false;
+				for (double[] offset : new double[][] { { 8, 0 }, { -8, 0 }, { 0, 8 }, { 0, -8 }, { 0, 0 } }) {
+					street |= survey.nearClass(e + offset[0], n + offset[1]) == SiteSurvey.ROAD;
+				}
+				if (street) {
+					continue;
+				}
+				houses.add(new House(e, -n, 9 + random.nextDouble() * 6, 14 + random.nextDouble() * 8,
+						random.nextInt(2) * Math.PI / 2 + (random.nextDouble() - 0.5) * 0.3, random.nextInt(WALLS.length),
+						random.nextInt(ROOFS.length)));
+			}
+		}
+	}
+
 	private List<double[]> treeShadows() {
 		List<double[]> shadows = new ArrayList<>();
 		for (Tree tree : trees) {
@@ -224,9 +327,14 @@ final class LaunchSite {
 		addPads(pieces);
 		addTent(pieces);
 		addWindsock(pieces);
-		addFence(pieces);
 		addTrees(pieces);
-		addHills(pieces);
+		if (survey != null) {
+			addTerrain(pieces, painted.terrain());
+			addHouses(pieces);
+		} else {
+			addFence(pieces);
+			addHills(pieces);
+		}
 		return pieces;
 	}
 
@@ -237,7 +345,7 @@ final class LaunchSite {
 	private void addGround(List<Piece> pieces, LaunchSiteImages.Images painted) {
 		GroundBuilder longGrass = new GroundBuilder(1 / LaunchSiteImages.DETAIL_TILE, 0);
 		GroundBuilder mownGrass = new GroundBuilder(1 / LaunchSiteImages.DETAIL_TILE, 0);
-		GroundBuilder paddock = new GroundBuilder(1 / LaunchSiteImages.FIELD_SPAN, LaunchSiteImages.FIELD_SPAN / 2);
+		GroundBuilder paddock = new GroundBuilder(1 / (2 * fieldHalf), fieldHalf);
 		GroundBuilder country = new GroundBuilder(1 / LaunchSiteImages.FAR_TILE, 0);
 		layGround(-GROUND_HALF, -GROUND_HALF, 2 * GROUND_HALF, longGrass, mownGrass, paddock, country);
 		pieces.add(new Piece(longGrass.build(), ground(painted.longGrass(), Appearance3D.TextureMode.REPEAT)));
@@ -261,9 +369,19 @@ final class LaunchSite {
 
 	private void layGround(double r, double d, double size, GroundBuilder longGrass, GroundBuilder mownGrass,
 			GroundBuilder paddock, GroundBuilder country) {
-		double field = LaunchSiteImages.FIELD_SPAN / 2;
+		double field = fieldHalf;
 		boolean straddlesField = r < field && r + size > -field && d < field && d + size > -field
 				&& !(r >= -field && r + size <= field && d >= -field && d + size <= field);
+		// A surveyed site's hills are their own mesh, round the paddock image.
+		if (survey != null) {
+			double hills = survey.farHalf();
+			boolean insideHills = r >= -hills && r + size <= hills && d >= -hills && d + size <= hills;
+			boolean outsideField = r >= field || r + size <= -field || d >= field || d + size <= -field;
+			if (insideHills && outsideField) {
+				return;
+			}
+			straddlesField |= r < hills && r + size > -hills && d < hills && d + size > -hills && !insideHills;
+		}
 		boolean touchesPatch = false;
 		boolean insidePatch = false;
 		for (double[] patch : patches) {
@@ -408,8 +526,10 @@ final class LaunchSite {
 		ToneMeshBuilder plates = new ToneMeshBuilder(toSun, 1);
 		ToneMeshBuilder stands = new ToneMeshBuilder(toSun, 1);
 		float plate = (float) PLATE_HEIGHT;
-		// The rail stands off the pad centre square to its own axis, away from the spectators.
-		Vector3f away = new Vector3f(depth).negate();
+		// The rail stands off the pad centre square to its own axis: under the rocket when it leans,
+		// so the rocket rests on its buttons, and away from the spectators when it stands upright.
+		Vector3f lean = new Vector3f(railAxis.x, 0, railAxis.z);
+		Vector3f away = lean.length() > Math.sin(Math.toRadians(0.5)) ? lean.normalize() : new Vector3f(depth).negate();
 		away.sub(new Vector3f(railAxis).mul(away.dot(railAxis))).normalize();
 		Vector3f side = new Vector3f(railAxis).cross(away).normalize();
 		float halfRail = (float) (railWidth / 2);
@@ -516,21 +636,119 @@ final class LaunchSite {
 			leaves.variant(tree.variant());
 			Vector3f fork = new Vector3f(base).add((float) random.nextGaussian() * 0.3f, h * 0.45f,
 					(float) random.nextGaussian() * 0.3f);
-			bark.cylinder(new Vector3f(base).add(0, -0.2f, 0), fork, trunk, trunk * 0.7f, 7, false);
+			boolean plain = Math.hypot(tree.r(), tree.d()) > PLAIN_TREES;
+			bark.cylinder(new Vector3f(base).add(0, -0.2f, 0), fork, trunk, trunk * 0.7f, plain ? 4 : 7, false);
+			if (plain) {
+				// Far off, two clumps in fewer faces look the same: a broad lower crown and a narrower top.
+				leaves.blob(new Vector3f(base).add(0.2f * canopy, h * 0.66f, -0.15f * canopy), canopy * 0.85f,
+						canopy * 0.55f, canopy * 0.8f, 6, 4);
+				leaves.blob(new Vector3f(base).add(-0.2f * canopy, h * 0.86f, 0.2f * canopy), canopy * 0.6f,
+						canopy * 0.45f, canopy * 0.6f, 6, 4);
+				continue;
+			}
 			int clumps = 3 + random.nextInt(3);
 			for (int c = 0; c < clumps; c++) {
 				double angle = 2 * Math.PI * (c + random.nextDouble() * 0.6) / clumps;
-				float reach = canopy * (0.35f + 0.45f * random.nextFloat());
+				// A gum's crown: loose clumps at different heights, taller than they are wide apart.
+				float reach = canopy * (0.25f + 0.5f * random.nextFloat());
 				Vector3f centre = new Vector3f(base).add((float) Math.cos(angle) * reach,
-						h * (0.68f + 0.2f * random.nextFloat()), (float) Math.sin(angle) * reach);
+						h * (0.58f + 0.34f * random.nextFloat()), (float) Math.sin(angle) * reach);
 				bark.cylinder(fork, new Vector3f(centre).add(0, -canopy * 0.2f, 0), trunk * 0.5f, trunk * 0.2f, 5, false);
-				float size = canopy * (0.5f + 0.25f * random.nextFloat());
-				leaves.blob(centre, size, size * (0.45f + 0.15f * random.nextFloat()), size * (0.85f + 0.3f * random.nextFloat()),
+				float size = canopy * (0.5f + 0.3f * random.nextFloat());
+				leaves.blob(centre, size, size * (0.6f + 0.25f * random.nextFloat()), size * (0.85f + 0.3f * random.nextFloat()),
 						9, 6);
 			}
 		}
 		pieces.add(toned(bark, BARK));
 		pieces.add(toned(leaves, LEAVES));
+	}
+
+	/**
+	 * The country round a surveyed site as a height grid, flat where it meets the paddock image and
+	 * falling away to the plain ground at its edge.
+	 */
+	private void addTerrain(List<Piece> pieces, ByteBuffer image) {
+		double half = survey.farHalf();
+		int count = (int) Math.round(2 * half / TERRAIN_GRID);
+		List<Vertex> vertices = new ArrayList<>();
+		IntList indices = new IntList();
+		int[] index = new int[(count + 1) * (count + 1)];
+		Arrays.fill(index, -1);
+		Vector3f up = new Vector3f(0, 1, 0);
+		for (int j = 0; j < count; j++) {
+			for (int i = 0; i < count; i++) {
+				double r0 = -half + i * TERRAIN_GRID, d0 = -half + j * TERRAIN_GRID;
+				if (r0 >= -fieldHalf && r0 + TERRAIN_GRID <= fieldHalf && d0 >= -fieldHalf && d0 + TERRAIN_GRID <= fieldHalf) {
+					continue;	// the paddock image is here
+				}
+				int[] corner = new int[4];
+				int[][] offsets = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+				for (int k = 0; k < 4; k++) {
+					int ci = i + offsets[k][0], cj = j + offsets[k][1];
+					int key = cj * (count + 1) + ci;
+					if (index[key] < 0) {
+						double r = -half + ci * TERRAIN_GRID, d = -half + cj * TERRAIN_GRID;
+						double edge = Math.max(Math.abs(r), Math.abs(d));
+						double blend = LaunchSiteImages.smoothstep(fieldHalf, fieldHalf + 1200, edge)
+								* (1 - LaunchSiteImages.smoothstep(half - 3000, half, edge));
+						double height = survey.height(r, -d) * blend;
+						Vector2f uv = new Vector2f((float) ((r + half) / (2 * half)), (float) ((d + half) / (2 * half)));
+						vertices.add(new Vertex(site(r, height, d).mul(S), up, uv, OUTSIDE));
+						index[key] = vertices.size() - 1;
+					}
+					corner[k] = index[key];
+				}
+				// Up-facing, as the ground squares are.
+				boolean upward = new Vector3f(row).cross(depth).y < 0;
+				if (upward) {
+					indices.addTriangle(corner[0], corner[2], corner[1]);
+					indices.addTriangle(corner[0], corner[3], corner[2]);
+				} else {
+					indices.addTriangle(corner[0], corner[1], corner[2]);
+					indices.addTriangle(corner[0], corner[2], corner[3]);
+				}
+			}
+		}
+		pieces.add(new Piece(new Mesh(vertices, indices), ground(image, Appearance3D.TextureMode.STRETCH)));
+	}
+
+	/** Houses with pitched roofs where the survey has homes. */
+	private void addHouses(List<Piece> pieces) {
+		ToneMeshBuilder walls = new ToneMeshBuilder(toSun, WALLS.length);
+		ToneMeshBuilder roofs = new ToneMeshBuilder(toSun, ROOFS.length);
+		for (House house : houses) {
+			Vector3f along = site(Math.cos(house.yaw()), 0, Math.sin(house.yaw())).normalize();
+			Vector3f across = new Vector3f(-along.z, 0, along.x);
+			float halfLength = (float) house.length() / 2, halfWidth = (float) house.width() / 2, eave = 2.7f;
+			Vector3f centre = site(house.r(), 0, house.d());
+			walls.variant(house.walls());
+			walls.box(new Vector3f(centre).add(0, eave / 2, 0), new Vector3f(along).mul(halfLength), new Vector3f(0, eave / 2, 0),
+					new Vector3f(across).mul(halfWidth));
+			// A gable roof along the house, overhanging the walls.
+			roofs.variant(house.roof());
+			float ridge = eave + halfWidth * 0.45f;
+			Vector3f a = new Vector3f(along).mul(halfLength + 0.4f), c = new Vector3f(across).mul(halfWidth + 0.5f);
+			Vector3f top = new Vector3f(centre).add(0, ridge, 0);
+			Vector3f lowLeft = new Vector3f(centre).add(0, eave - 0.2f, 0).sub(c);
+			Vector3f lowRight = new Vector3f(centre).add(0, eave - 0.2f, 0).add(c);
+			roofs.twoSidedQuad(new Vector3f(lowLeft).sub(a), new Vector3f(lowLeft).add(a), new Vector3f(top).add(a),
+					new Vector3f(top).sub(a));
+			roofs.twoSidedQuad(new Vector3f(lowRight).add(a), new Vector3f(lowRight).sub(a), new Vector3f(top).sub(a),
+					new Vector3f(top).add(a));
+			Vector3f wallTop = new Vector3f(centre).add(0, eave, 0);
+			Vector3f gableLeft = new Vector3f(wallTop).sub(new Vector3f(across).mul(halfWidth));
+			Vector3f gableRight = new Vector3f(wallTop).add(new Vector3f(across).mul(halfWidth));
+			Vector3f gableTop = new Vector3f(centre).add(0, ridge - 0.05f, 0);
+			Vector3f end = new Vector3f(along).mul(halfLength);
+			walls.twoSidedQuad(new Vector3f(gableLeft).add(end), new Vector3f(gableRight).add(end),
+					new Vector3f(gableTop).add(end), new Vector3f(gableTop).add(end));
+			walls.twoSidedQuad(new Vector3f(gableLeft).sub(end), new Vector3f(gableRight).sub(end),
+					new Vector3f(gableTop).sub(end), new Vector3f(gableTop).sub(end));
+		}
+		if (!walls.isEmpty()) {
+			pieces.add(toned(walls, WALLS));
+			pieces.add(toned(roofs, ROOFS));
+		}
 	}
 
 	/** Low hills on the horizon, far enough out that the haze softens them. */
