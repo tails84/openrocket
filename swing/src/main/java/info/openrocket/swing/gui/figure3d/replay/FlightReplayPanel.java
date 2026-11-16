@@ -39,8 +39,13 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 	private final boolean hasMotors;
 
 	// Render thread only
-	private final PlaybackClock clock;
+	private PlaybackClock clock;
 	private long lastFrameNanos;
+
+	private final double startTime;
+	/** End of the simulated flight. */
+	private final double simulatedEnd;
+	private volatile double endTime;
 
 	private final AtomicReference<Double> pendingSeek = new AtomicReference<>();
 	private final AtomicBoolean dirty = new AtomicBoolean(true);
@@ -63,24 +68,29 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 		this.hasMotors = document.getSelectedConfiguration() != null
 				&& document.getSelectedConfiguration().hasMotors();
 		FlightReplayData main = branches.get(0);
-		double end = main.getEndTime();
-		boolean landed = !Double.isNaN(main.getGroundHitTime());
+		this.startTime = main.getStartTime();
+		this.simulatedEnd = endOf(branches);
+		this.endTime = simulatedEnd;
+		this.clock = new PlaybackClock(startTime, endTime);
+		this.currentTime = startTime;
+	}
+
+	/** When playback stops: the last branch's end, and a moment more if something lands. */
+	private static double endOf(List<FlightReplayData> branches) {
+		double end = branches.get(0).getEndTime();
+		boolean landed = false;
 		for (FlightReplayData branch : branches) {
 			end = Math.max(end, branch.getEndTime());
 			landed |= !Double.isNaN(branch.getGroundHitTime());
 		}
-		if (landed) {
-			end += LANDING_HOLD_SECONDS;
-		}
-		this.clock = new PlaybackClock(main.getStartTime(), end);
-		this.currentTime = main.getStartTime();
+		return landed ? end + LANDING_HOLD_SECONDS : end;
 	}
 
 	// ---------- playback control (any thread) ----------
 
 	void play() {
-		if (currentTime >= clock.getEnd()) {
-			seek(clock.getStart());
+		if (currentTime >= endTime) {
+			seek(startTime);
 		}
 		playing = true;
 		requestRenderNow();
@@ -96,7 +106,7 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 	}
 
 	void seek(double time) {
-		double clamped = Math.max(clock.getStart(), Math.min(clock.getEnd(), time));
+		double clamped = Math.max(startTime, Math.min(endTime, time));
 		pendingSeek.set(clamped);
 		currentTime = clamped;
 		requestRenderNow();
@@ -122,11 +132,23 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 	}
 
 	double getStartTime() {
-		return clock.getStart();
+		return startTime;
 	}
 
 	double getEndTime() {
-		return clock.getEnd();
+		return endTime;
+	}
+
+	/**
+	 * Shows a recorded flight beside the simulation, and plays on until it ends too.
+	 *
+	 * @param measured the measured flight on the simulation's clock
+	 */
+	void setMeasured(FlightReplayData measured) {
+		endTime = Math.max(simulatedEnd, endOf(List.of(measured)));
+		currentTime = Math.min(currentTime, endTime);
+		replayScene.setMeasured(measured);
+		requestRenderNow();
 	}
 
 	// ---------- lifecycle ----------
@@ -250,6 +272,13 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 				: Math.min(MAX_FRAME_SECONDS, (now - lastFrameNanos) / 1.0e9f);
 		lastFrameNanos = now;
 
+		// A measured flight changes where playback ends.
+		if (clock.getEnd() != endTime) {
+			PlaybackClock resized = new PlaybackClock(startTime, endTime);
+			resized.setTime(clock.getTime());
+			resized.setRate(clock.getRate());
+			clock = resized;
+		}
 		Double seek = pendingSeek.getAndSet(null);
 		if (seek != null) {
 			clock.setTime(seek);

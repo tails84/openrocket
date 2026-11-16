@@ -1,7 +1,9 @@
 package info.openrocket.swing.gui.figure3d.replay;
 
+import info.openrocket.core.l10n.Translator;
 import info.openrocket.core.simulation.FlightDataType;
 import info.openrocket.core.simulation.FlightEvent;
+import info.openrocket.core.startup.Application;
 
 import javax.swing.JComponent;
 import javax.swing.ToolTipManager;
@@ -14,6 +16,7 @@ import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
+import java.awt.Stroke;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.geom.Path2D;
@@ -33,13 +36,17 @@ final class FlightReplayTimeline extends JComponent {
 
 	// Okabe-Ito palette; each marker also carries a letter.
 	private static final Color PROFILE = new Color(0x00, 0x72, 0xB2);
+	static final Color MEASURED = new Color(0xCC, 0x79, 0xA7);
+	private static final Translator trans = Application.getTranslator();
 
 	private final FlightReplayData data;
 	private final double start;
-	private final double end;
+	private double end;
 	private final double[] times;
 	private final double[] altitudes;
-	private final double maxAltitude;
+	private double maxAltitude;
+	private double[] measuredTimes;
+	private double[] measuredAltitudes;
 	private final DoubleConsumer seekListener;
 	private double time;
 	private final List<PlacedMarker> placedMarkers = new ArrayList<>();
@@ -81,6 +88,20 @@ final class FlightReplayTimeline extends JComponent {
 		};
 		addMouseListener(scrub);
 		addMouseMotionListener(scrub);
+	}
+
+	/** Draws a recorded flight's altitude over the simulated one, on a timeline running to {@code end}. */
+	void setMeasured(FlightReplayData measured, double end) {
+		this.end = end;
+		measuredTimes = measured.getTimes();
+		measuredAltitudes = new double[measuredTimes.length];
+		for (int i = 0; i < measuredTimes.length; i++) {
+			measuredAltitudes[i] = measured.getValue(FlightDataType.TYPE_ALTITUDE, measuredTimes[i]);
+			if (Double.isFinite(measuredAltitudes[i])) {
+				maxAltitude = Math.max(maxAltitude, measuredAltitudes[i]);
+			}
+		}
+		repaint();
 	}
 
 	void setTime(double time) {
@@ -159,6 +180,9 @@ final class FlightReplayTimeline extends JComponent {
 			g.setColor(PROFILE);
 			g.setStroke(new BasicStroke(1.2f));
 			g.draw(profile);
+			if (measuredTimes != null) {
+				paintMeasured(g, top, bottom, right, foreground);
+			}
 
 			g.setColor(border);
 			g.setStroke(new BasicStroke(1f));
@@ -176,6 +200,52 @@ final class FlightReplayTimeline extends JComponent {
 		} finally {
 			g.dispose();
 		}
+	}
+
+	/** The measured altitude as a dashed line, with a key telling the two apart. */
+	private void paintMeasured(Graphics2D g, int top, int bottom, int right, Color foreground) {
+		Path2D line = new Path2D.Double();
+		boolean started = false;
+		for (int i = 0; i < measuredTimes.length; i++) {
+			if (!Double.isFinite(measuredAltitudes[i])) {
+				continue;
+			}
+			double x = xOf(measuredTimes[i]);
+			double y = bottom - (measuredAltitudes[i] / maxAltitude) * (bottom - top - 4);
+			if (started) {
+				line.lineTo(x, y);
+			} else {
+				line.moveTo(x, y);
+				started = true;
+			}
+		}
+		Stroke dashed = new BasicStroke(2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND, 1f, new float[] { 6f, 4f }, 0f);
+		g.setColor(MEASURED);
+		g.setStroke(dashed);
+		g.draw(line);
+
+		// Key, top right inside the plot
+		Font font = getFont().deriveFont(10f);
+		g.setFont(font);
+		FontMetrics metrics = g.getFontMetrics();
+		String simulated = trans.get("FlightReplay.timeline.simulated");
+		String measured = trans.get("FlightReplay.timeline.measured");
+		int swatch = 18;
+		int y = top + 4 + metrics.getAscent();
+		int x = right - 6 - metrics.stringWidth(measured);
+		g.setColor(foreground);
+		g.drawString(measured, x, y);
+		x -= swatch + 4;
+		g.setColor(MEASURED);
+		g.setStroke(dashed);
+		g.drawLine(x, y - metrics.getAscent() / 2 + 1, x + swatch, y - metrics.getAscent() / 2 + 1);
+		x -= 12 + metrics.stringWidth(simulated);
+		g.setColor(foreground);
+		g.drawString(simulated, x, y);
+		x -= swatch + 4;
+		g.setColor(PROFILE);
+		g.setStroke(new BasicStroke(2f));
+		g.drawLine(x, y - metrics.getAscent() / 2 + 1, x + swatch, y - metrics.getAscent() / 2 + 1);
 	}
 
 	private void paintMarkers(Graphics2D g, Color foreground, int top) {

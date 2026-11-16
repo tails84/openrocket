@@ -4,6 +4,7 @@ import info.openrocket.core.document.OpenRocketDocument;
 import info.openrocket.core.document.Simulation;
 import info.openrocket.core.l10n.Translator;
 import info.openrocket.core.simulation.FlightData;
+import info.openrocket.core.simulation.FlightDataType;
 import info.openrocket.core.simulation.SimulationOptions;
 import info.openrocket.core.startup.Application;
 import info.openrocket.swing.gui.util.GUIUtil;
@@ -15,6 +16,7 @@ import javax.swing.InputMap;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
+import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
@@ -23,6 +25,7 @@ import javax.swing.JScrollPane;
 import javax.swing.KeyStroke;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.Timer;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.Window;
@@ -30,6 +33,8 @@ import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -43,11 +48,15 @@ public final class FlightReplayFrame extends JFrame {
 	private static final int DEFAULT_SPEED = 3;
 	private static final double STEP_SECONDS = 1.0;
 
+	private final List<FlightReplayData> branches;
 	private final FlightReplayPanel replayPanel;
 	private final FlightReplayTimeline timeline;
 	private final FlightReplayReadout readout;
 	private final JButton playButton;
+	private final JLabel followLabel;
+	private final JComboBox<String> followBox;
 	private final Timer refreshTimer;
+	private boolean measuredShown;
 
 	/**
 	 * Opens a replay of the first flight branch of a simulation that has flight data.
@@ -86,6 +95,7 @@ public final class FlightReplayFrame extends JFrame {
 		setDefaultCloseOperation(DISPOSE_ON_CLOSE);
 		GUIUtil.setWindowIcons(this);
 
+		this.branches = branches;
 		SimulationOptions options = simulation.getOptions();
 		FlightReplayData data = branches.get(0);
 		FlightReplayScene scene = new FlightReplayScene(branches, document.getRocket(),
@@ -119,29 +129,38 @@ public final class FlightReplayFrame extends JFrame {
 		cameraBox.addActionListener(e -> replayPanel.setCameraMode(
 				FlightReplayScene.CameraMode.values()[Math.max(0, cameraBox.getSelectedIndex())]));
 
-		JComboBox<String> followBox = new JComboBox<>();
+		followBox = new JComboBox<>();
 		for (FlightReplayData branch : branches) {
 			followBox.addItem(branch.getName());
 		}
 		followBox.setFocusable(false);
-		followBox.addActionListener(e -> replayPanel.setFollowBody(Math.max(0, followBox.getSelectedIndex())));
+		followBox.addActionListener(e -> {
+			int index = Math.max(0, followBox.getSelectedIndex());
+			replayPanel.setFollowBody(index < branches.size() ? index : FlightReplayScene.FOLLOW_MEASURED);
+		});
+		followLabel = new JLabel(trans.get("FlightReplay.lbl.follow"));
 
-		JPanel controls = new JPanel(new MigLayout("fillx, insets 6 10 8 10", "[][]20[][]20[][]20[][]push[]"));
+		JButton loadLogButton = new JButton(trans.get("FlightReplay.but.loadLog"));
+		loadLogButton.setToolTipText(trans.get("FlightReplay.but.ttip.loadLog"));
+		loadLogButton.setFocusable(false);
+		loadLogButton.addActionListener(e -> chooseLog());
+
+		JPanel controls = new JPanel(new MigLayout("fillx, hidemode 3, insets 6 10 8 10",
+				"[][]20[][]20[][]20[][]20[]push[]"));
 		controls.add(playButton, "sg playback");
 		controls.add(restartButton, "sg playback");
 		controls.add(new JLabel(trans.get("FlightReplay.lbl.speed")));
 		controls.add(speedBox);
 		controls.add(new JLabel(trans.get("FlightReplay.lbl.camera")));
 		controls.add(cameraBox);
-		// Only staged flights have more than one thing to follow.
-		boolean staged = branches.size() > 1;
-		if (staged) {
-			controls.add(new JLabel(trans.get("FlightReplay.lbl.follow")));
-			controls.add(followBox);
-		}
+		// Only staged flights, or a flight beside a recorded one, have more than one thing to follow.
+		controls.add(followLabel);
+		controls.add(followBox);
+		setFollowVisible(branches.size() > 1);
+		controls.add(loadLogButton);
 		JLabel hint = new JLabel(trans.get("FlightReplay.lbl.keys"));
 		hint.setEnabled(false);
-		controls.add(hint, staged ? "wmin 0, wrap" : "skip 2, wmin 0, wrap");
+		controls.add(hint, "wmin 0, wrap");
 		controls.add(timeline, "span, growx, h 90!");
 
 		// The playback keys work while the window has focus; controls do not take it.
@@ -176,6 +195,47 @@ public final class FlightReplayFrame extends JFrame {
 				replayPanel.dispose();
 			}
 		});
+		refresh();
+	}
+
+	private void setFollowVisible(boolean visible) {
+		followLabel.setVisible(visible);
+		followBox.setVisible(visible);
+	}
+
+	private void chooseLog() {
+		JFileChooser chooser = new JFileChooser(Application.getPreferences().getDefaultDirectory());
+		chooser.setDialogTitle(trans.get("FlightReplay.loadLog.title"));
+		chooser.setFileFilter(new FileNameExtensionFilter(trans.get("FlightReplay.loadLog.filter"), "csv", "txt", "tsv"));
+		if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+			return;
+		}
+		Application.getPreferences().setDefaultDirectory(chooser.getCurrentDirectory());
+		loadLog(chooser.getSelectedFile().toPath());
+	}
+
+	/** Reads an altimeter or flight computer log and shows it beside the simulated flight. */
+	void loadLog(Path file) {
+		FlightReplayData simulated = branches.get(0);
+		double expectedApogee = Double.isNaN(simulated.getApogeeTime()) ? Double.NaN
+				: simulated.getValue(FlightDataType.TYPE_ALTITUDE, simulated.getApogeeTime());
+		FlightLog log;
+		try {
+			log = FlightLogReader.read(file, expectedApogee);
+		} catch (IOException | FlightLogReader.LogException e) {
+			JOptionPane.showMessageDialog(this, trans.get("FlightReplay.loadLog.failed") + "\n" + e.getMessage(),
+					trans.get("FlightReplay.loadLog.title"), JOptionPane.ERROR_MESSAGE);
+			return;
+		}
+		FlightReplayData measured = MeasuredFlight.build(log, simulated, trans.get("FlightReplay.measured"));
+		replayPanel.setMeasured(measured);
+		timeline.setMeasured(measured, replayPanel.getEndTime());
+		readout.setMeasured(log, measured);
+		if (!measuredShown) {
+			followBox.addItem(trans.get("FlightReplay.measured"));
+			measuredShown = true;
+		}
+		setFollowVisible(true);
 		refresh();
 	}
 

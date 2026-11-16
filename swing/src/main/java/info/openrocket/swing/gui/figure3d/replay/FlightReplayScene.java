@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Poses the rocket and its surroundings for one moment of a replayed flight. Runs on the GL thread.
@@ -88,6 +89,13 @@ final class FlightReplayScene {
 	private static final Vector3f CANOPY_DEFAULT = new Vector3f(0.835f, 0.369f, 0.0f);	// vermillion
 	private static final Vector3f CANOPY_SECOND = new Vector3f(0.95f, 0.95f, 0.93f);
 	private static final Vector3f SHROUD_LINE = new Vector3f(0.25f, 0.25f, 0.25f);
+	private static final Vector3f MEASURED = new Vector3f(0.800f, 0.475f, 0.655f);	// reddish purple
+	private static final float MEASURED_OPACITY = 0.55f;
+	/** Least distance between neighbouring pads, metres. */
+	private static final double PAD_SPACING = 1;
+
+	/** Follow value that puts the cameras on the measured flight. */
+	static final int FOLLOW_MEASURED = -1;
 
 	/** Which body and section a rocket part moves with. */
 	record Part(int body, int section, RecoveryDevice device) {
@@ -98,11 +106,29 @@ final class FlightReplayScene {
 			List<double[]> smoke) {
 	}
 
-	private record TrailSegment(SceneObject object, int body, double startTime, double endTime,
+	private record TrailSegment(SceneObject object, ReplayBody body, double startTime, double endTime,
 			Vector3f start, Vector3f end) {
 	}
 
-	private record Canopy(int body, int deployment, double deployTime, SceneObject[] parts) {
+	private record Canopy(ReplayBody body, int deployment, double deployTime, SceneObject[] parts) {
+	}
+
+	private record CordPool(ReplayBody body, List<SceneObject> cords) {
+	}
+
+	/**
+	 * A recorded flight shown beside the simulation: a translucent copy of the main rocket flying
+	 * from the next pad, with its own trail, canopies and cords.
+	 */
+	private static final class Ghost {
+		final ReplayBody body;
+		final List<SceneObject> objects = new ArrayList<>();
+		final Map<SceneObject, Part> parts = new IdentityHashMap<>();
+		final Map<SceneObject, Matrix4f> bases = new IdentityHashMap<>();
+
+		Ghost(ReplayBody body) {
+			this.body = body;
+		}
 	}
 
 	private final List<ReplayBody> bodies = new ArrayList<>();
@@ -124,7 +150,10 @@ final class FlightReplayScene {
 	private final List<SceneObject> siteObjects = new ArrayList<>();
 	private final List<TrailSegment> trail = new ArrayList<>();
 	private final List<Canopy> canopies = new ArrayList<>();
-	private final List<List<SceneObject>> cordPools = new ArrayList<>();
+	private final List<CordPool> cordPools = new ArrayList<>();
+	/** A measured flight waiting to be added on the GL thread. */
+	private final AtomicReference<FlightReplayData> pendingMeasured = new AtomicReference<>();
+	private Ghost ghost;
 
 	private CameraMode appliedMode;
 	private ReplayBody followedBody;
@@ -296,12 +325,13 @@ final class FlightReplayScene {
 
 		addSiteObject(scene, ReplayMeshes.groundTiles(0), GRASS_LIGHT);
 		addSiteObject(scene, ReplayMeshes.groundTiles(1), GRASS_DARK);
-		addPadAndRail(scene);
-		Mesh cylinder = ReplayMeshes.unitCylinder(6);
+		addPadAndRail(scene, new Vector3f());
 		for (int i = 0; i < bodies.size(); i++) {
-			addTrail(scene, cylinder, i);
-			addCanopies(scene, i);
-			addCords(scene, cylinder, i);
+			ReplayBody body = bodies.get(i);
+			double start = i == 0 ? body.getData().getLiftoffTime() : body.getSeparationTime();
+			addTrail(scene, body, start, unlit(TRAIL_ASCENT), unlit(TRAIL_DESCENT));
+			addCanopies(scene, body, null, 1);
+			addCords(scene, body);
 		}
 	}
 
@@ -331,9 +361,10 @@ final class FlightReplayScene {
 		orchestrator.getCameraController().setZoomFitting(false);
 	}
 
-	private void addPadAndRail(Scene scene) {
+	/** Adds a pad and rail with its centre {@code offset} engine units from the launch site's origin. */
+	private List<SceneObject> addPadAndRail(Scene scene, Vector3f offset) {
 		Vector3f tail = new Vector3f(0, (float) (launchCgHeight * S), 0)
-				.sub(new Vector3f(launchAxis).mul((float) (length - launchCg) * S));
+				.sub(new Vector3f(launchAxis).mul((float) (length - launchCg) * S)).add(offset);
 		SceneObject plate = addSiteObject(scene, ReplayMeshes.disc((float) Math.max(0.25, 3 * bodyRadius) * S, 32),
 				CONCRETE);
 		plate.getModelMatrix().translate(tail.x, 0.03f * S, tail.z);
@@ -345,21 +376,21 @@ final class FlightReplayScene {
 				.translate(railBase)
 				.rotate(new Quaternionf().rotateTo(new Vector3f(0, 1, 0), launchAxis))
 				.scale(0.01f * S, (float) Math.max(railLength, 0.1) * S, 0.01f * S);
+		return List.of(plate, rail);
 	}
 
-	private void addTrail(Scene scene, Mesh cylinder, int index) {
-		ReplayBody body = bodies.get(index);
+	private List<SceneObject> addTrail(Scene scene, ReplayBody body, double start, Appearance3D ascent,
+			Appearance3D descent) {
 		FlightReplayData data = body.getData();
-		Appearance3D ascent = unlit(TRAIL_ASCENT);
-		Appearance3D descent = unlit(TRAIL_DESCENT);
-		double start = index == 0 ? data.getLiftoffTime() : body.getSeparationTime();
 		if (Double.isNaN(start)) {
 			start = data.getStartTime();
 		}
 		double end = data.getEndTime();
+		List<SceneObject> added = new ArrayList<>();
 		if (end <= start) {
-			return;
+			return added;
 		}
+		Mesh cylinder = ReplayMeshes.unitCylinder(6);
 		double step = Math.max(TRAIL_MIN_STEP, (end - start) / TRAIL_MAX_SEGMENTS);
 		double apogee = data.getApogeeTime();
 		Vector3f previous = sitePivot(body, start);
@@ -371,9 +402,11 @@ final class FlightReplayScene {
 			segment.setSelectable(false);
 			hide(segment);
 			scene.addObject(segment);
-			trail.add(new TrailSegment(segment, index, t0, t1, previous, next));
+			trail.add(new TrailSegment(segment, body, t0, t1, previous, next));
+			added.add(segment);
 			previous = next;
 		}
+		return added;
 	}
 
 	private static Vector3f sitePivot(ReplayBody body, double t) {
@@ -381,8 +414,12 @@ final class FlightReplayScene {
 		return new Vector3f(body.getSitePivot());
 	}
 
-	private void addCanopies(Scene scene, int index) {
-		ReplayBody body = bodies.get(index);
+	/**
+	 * @param color   colour for every canopy, or null for each device's own
+	 * @param opacity opacity of the gores
+	 */
+	private List<SceneObject> addCanopies(Scene scene, ReplayBody body, Vector3f color, float opacity) {
+		List<SceneObject> added = new ArrayList<>();
 		List<RecoveryDevice> devices = body.getDeployedDevices();
 		for (int d = 0; d < devices.size(); d++) {
 			if (!(devices.get(d) instanceof Parachute parachute)) {
@@ -390,9 +427,12 @@ final class FlightReplayScene {
 			}
 			ReplayMeshes.CanopyShape shape = ReplayMeshes.CanopyShape.of(parachute.getDiameter(),
 					parachute.getLineLength(), parachute.getLineCount());
-			Vector3f primary = canopyColor(parachute);
-			SceneObject goresA = new SceneObject(ReplayMeshes.canopy(shape, 0), new Vector3f(), lit(primary));
-			SceneObject goresB = new SceneObject(ReplayMeshes.canopy(shape, 1), new Vector3f(), lit(CANOPY_SECOND));
+			Appearance3D primary = lit(color != null ? color : canopyColor(parachute));
+			Appearance3D second = lit(CANOPY_SECOND);
+			primary.setOpacity(opacity);
+			second.setOpacity(opacity);
+			SceneObject goresA = new SceneObject(ReplayMeshes.canopy(shape, 0), new Vector3f(), primary);
+			SceneObject goresB = new SceneObject(ReplayMeshes.canopy(shape, 1), new Vector3f(), second);
 			SceneObject lines = new SceneObject(ReplayMeshes.shroudLines(shape, 0.004f * S), new Vector3f(),
 					unlit(SHROUD_LINE));
 			SceneObject[] canopyParts = { goresA, goresB, lines };
@@ -400,22 +440,127 @@ final class FlightReplayScene {
 				part.setSelectable(false);
 				hide(part);
 				scene.addObject(part);
+				added.add(part);
 			}
-			canopies.add(new Canopy(index, d, body.deploymentTime(parachute), canopyParts));
+			canopies.add(new Canopy(body, d, body.deploymentTime(parachute), canopyParts));
 		}
+		return added;
 	}
 
-	private void addCords(Scene scene, Mesh cylinder, int index) {
+	private List<SceneObject> addCords(Scene scene, ReplayBody body) {
 		List<SceneObject> pool = new ArrayList<>();
+		Mesh cylinder = ReplayMeshes.unitCylinder(6);
 		Appearance3D appearance = unlit(SHROUD_LINE);
-		for (int i = 0; i < bodies.get(index).getSectionCount() + 1; i++) {
+		for (int i = 0; i < body.getSectionCount() + 1; i++) {
 			SceneObject cord = new SceneObject(cylinder, new Vector3f(), appearance);
 			cord.setSelectable(false);
 			hide(cord);
 			scene.addObject(cord);
 			pool.add(cord);
 		}
-		cordPools.add(pool);
+		cordPools.add(new CordPool(body, pool));
+		return pool;
+	}
+
+	// ---------- measured flight ----------
+
+	/**
+	 * Shows a recorded flight beside the simulation, replacing any shown before. Call from any
+	 * thread; it is added before the next frame renders.
+	 */
+	void setMeasured(FlightReplayData measured) {
+		pendingMeasured.set(measured);
+	}
+
+	/** The measured flight lifts off from the next pad along the line, as seen by the observer. */
+	private Vector3f measuredPadOffset() {
+		Vector3f side = observerDirection();
+		// Close enough that the chase view shows both rockets on their pads.
+		double spacing = Math.max(PAD_SPACING, 1.2 * length);
+		return new Vector3f(side.z, 0, -side.x).mul((float) (spacing * S));
+	}
+
+	/** Adds the measured flight's rocket, pad, trail, canopies and cords. Runs on the GL thread. */
+	private void installMeasured(Scene scene, FlightReplayData measured) {
+		removeMeasured(scene);
+		List<ReplayBody.DeviceJoint> devices = new ArrayList<>();
+		for (FlightReplayData.Event deployment : measured.getDeployments()) {
+			if (deployment.source() instanceof RecoveryDevice device && ownerOf(device) == 0) {
+				devices.add(new ReplayBody.DeviceJoint(deployment.time(), device,
+						stationOf(device, main.getFront(), main.getAft())));
+			}
+		}
+		ReplayBody body = new ReplayBody(measured, main.getFront(), main.getAft(), main.getRadius(), devices,
+				launchCgHeight, launchAxis);
+		Vector3f padOffset = measuredPadOffset();
+		body.setSiteOffset(padOffset);
+		Ghost added = new Ghost(body);
+
+		// A copy of every part that flies with the main rocket.
+		for (SceneObject source : new ArrayList<>(scene.getObjects())) {
+			RocketComponent component = source.getRocketComponent();
+			Matrix4f base = baseTransforms.get(source);
+			if (component == null || base == null || ownerOf(component) != 0) {
+				continue;
+			}
+			Appearance3D look = lit(MEASURED);
+			look.setOpacity(MEASURED_OPACITY);
+			SceneObject copy = new SceneObject(source.getMesh(), new Vector3f(), look);
+			copy.setSelectable(false);
+			hide(copy);
+			scene.addObject(copy);
+			added.objects.add(copy);
+			RecoveryDevice device = component instanceof RecoveryDevice recovery ? recovery : null;
+			added.parts.put(copy, new Part(0, body.sectionOf(frontOf(component) + 0.5 * component.getLength()),
+					device));
+			added.bases.put(copy, new Matrix4f(base));
+		}
+		added.objects.addAll(addPadAndRail(scene, padOffset));
+		added.objects.addAll(addTrail(scene, body, measured.getLiftoffTime(), unlit(MEASURED), unlit(MEASURED)));
+		added.objects.addAll(addCanopies(scene, body, MEASURED, MEASURED_OPACITY));
+		added.objects.addAll(addCords(scene, body));
+		ghost = added;
+	}
+
+	private void removeMeasured(Scene scene) {
+		if (ghost == null) {
+			return;
+		}
+		ReplayBody body = ghost.body;
+		trail.removeIf(segment -> segment.body() == body);
+		canopies.removeIf(canopy -> canopy.body() == body);
+		cordPools.removeIf(pool -> pool.body() == body);
+		for (SceneObject object : ghost.objects) {
+			scene.removeObject(object);
+			siteObjects.remove(object);
+			baseTransforms.remove(object);
+			object.cleanup();
+		}
+		ghost = null;
+	}
+
+	/** Whether a log stopped recording in the air before {@code t}, so there is nothing to show. */
+	private static boolean endedAloft(ReplayBody body, double t) {
+		FlightReplayData data = body.getData();
+		return t > data.getEndTime() && Double.isNaN(data.getGroundHitTime());
+	}
+
+	private void applyMeasured(double t, Vector3f origin) {
+		ReplayBody body = ghost.body;
+		Vector3f offset = new Vector3f(body.getSitePivot()).sub(origin);
+		boolean ended = endedAloft(body, t);
+		for (SceneObject object : ghost.objects) {
+			Part part = ghost.parts.get(object);
+			if (part == null) {
+				continue;
+			}
+			if (ended || part.device() != null && t >= body.deploymentTime(part.device())) {
+				hide(object);
+				continue;
+			}
+			new Matrix4f().translation(offset).mul(body.getSectionMatrix(part.section()))
+					.mul(ghost.bases.get(object), object.getModelMatrix());
+		}
 	}
 
 	private static Vector3f canopyColor(RecoveryDevice device) {
@@ -458,6 +603,13 @@ final class FlightReplayScene {
 		if (scene == null) {
 			return;
 		}
+		// A measured flight copies the rocket's parts, so it waits for their first placement.
+		if (!parts.isEmpty()) {
+			FlightReplayData measured = pendingMeasured.getAndSet(null);
+			if (measured != null) {
+				installMeasured(scene, measured);
+			}
+		}
 		// The rail and pad were placed when they were added; capture them before the first move.
 		for (SceneObject object : siteObjects) {
 			baseTransforms.computeIfAbsent(object, o -> new Matrix4f(o.getModelMatrix()));
@@ -468,6 +620,10 @@ final class FlightReplayScene {
 		Vector3f origin = new Vector3f(main.getSitePivot());
 
 		applyRocketParts(scene, t, origin);
+		if (ghost != null) {
+			ghost.body.update(t);
+			applyMeasured(t, origin);
+		}
 		applyEmitters(scene, t, origin);
 
 		Matrix4f site = new Matrix4f().translation(-origin.x, -origin.y, -origin.z);
@@ -476,17 +632,22 @@ final class FlightReplayScene {
 		}
 
 		Camera camera = scene.getCamera();
-		ReplayBody followed = bodies.get(Math.max(0, Math.min(bodies.size() - 1, follow)));
-		// A stage follows the main rocket until it separates.
-		if (followed != main && !(t >= followed.getSeparationTime())) {
-			followed = main;
+		ReplayBody followed;
+		if (follow == FOLLOW_MEASURED && ghost != null) {
+			followed = ghost.body;
+		} else {
+			followed = bodies.get(Math.max(0, Math.min(bodies.size() - 1, follow)));
+			// A stage follows the main rocket until it separates.
+			if (followed != main && !(t >= followed.getSeparationTime())) {
+				followed = main;
+			}
 		}
 		applyCamera(orchestrator, camera, mode, followed, origin, frameSeconds);
 		float pixelAngle = (float) (2 * Math.tan(camera.getFieldOfView() / 2)
 				/ Math.max(1, orchestrator.getViewport().getWindowHeight()));
 		applyTrail(camera, pixelAngle, t, origin);
 		applyCanopies(t, origin);
-		applyCords(camera, pixelAngle, origin);
+		applyCords(camera, pixelAngle, t, origin);
 	}
 
 	/**
@@ -648,19 +809,19 @@ final class FlightReplayScene {
 				hide(segment.object());
 				continue;
 			}
-			Vector3f end = t < segment.endTime() ? bodies.get(segment.body()).getSitePivot() : segment.end();
+			Vector3f end = t < segment.endTime() ? segment.body().getSitePivot() : segment.end();
 			placeLine(segment.object(), new Vector3f(segment.start()).sub(origin), new Vector3f(end).sub(origin),
 					eye, pixelAngle, TRAIL_WIDTH_PIXELS, 0);
 		}
 	}
 
-	private void applyCords(Camera camera, float pixelAngle, Vector3f origin) {
+	private void applyCords(Camera camera, float pixelAngle, double t, Vector3f origin) {
 		Vector3f eye = camera.getPosition();
-		for (int b = 0; b < bodies.size(); b++) {
-			ReplayBody body = bodies.get(b);
+		for (CordPool cordPool : cordPools) {
+			ReplayBody body = cordPool.body();
 			Vector3f offset = new Vector3f(body.getSitePivot()).sub(origin);
-			List<Vector3f[]> cords = body.getCords();
-			List<SceneObject> pool = cordPools.get(b);
+			List<Vector3f[]> cords = endedAloft(body, t) ? List.of() : body.getCords();
+			List<SceneObject> pool = cordPool.cords();
 			for (int i = 0; i < pool.size(); i++) {
 				if (i < cords.size()) {
 					placeLine(pool.get(i), new Vector3f(cords.get(i)[0]).add(offset),
@@ -690,8 +851,9 @@ final class FlightReplayScene {
 
 	private void applyCanopies(double t, Vector3f origin) {
 		for (Canopy canopy : canopies) {
-			ReplayBody body = bodies.get(canopy.body());
-			Vector3f position = t < canopy.deployTime() ? null : body.getCanopyPosition(canopy.deployment());
+			ReplayBody body = canopy.body();
+			Vector3f position = t < canopy.deployTime() || endedAloft(body, t) ? null
+					: body.getCanopyPosition(canopy.deployment());
 			if (position == null) {
 				for (SceneObject part : canopy.parts()) {
 					hide(part);
@@ -780,13 +942,16 @@ final class FlightReplayScene {
 	/** A spectator standing beside the pad, off to the side of the launch direction. */
 	private Vector3f observerSitePosition() {
 		double distance = Math.max(30, Math.min(150, 25 * length));
+		return observerDirection().mul((float) (distance * S)).add(0, (float) (OBSERVER_EYE_HEIGHT * S), 0);
+	}
+
+	/** Level direction from the pad to the spectator, square to the launch direction. */
+	private Vector3f observerDirection() {
 		Vector3f side = new Vector3f(launchAxis.x, 0, launchAxis.z);
 		if (side.lengthSquared() < 1e-4f) {
-			side.set(0, 0, 1);	// vertical launch: stand south of the pad
-		} else {
-			side.normalize().set(-side.z, 0, side.x);
+			return side.set(0, 0, 1);	// vertical launch: stand south of the pad
 		}
-		return side.mul((float) (distance * S)).add(0, (float) (OBSERVER_EYE_HEIGHT * S), 0);
+		return side.normalize().set(-side.z, 0, side.x);
 	}
 
 	// ---------- helpers ----------

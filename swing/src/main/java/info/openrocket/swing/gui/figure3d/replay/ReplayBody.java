@@ -67,6 +67,8 @@ final class ReplayBody {
 	// Results of the last update(), in the body frame.
 	private final Matrix4f[] sectionMatrices;
 	private final Vector3f sitePivot = new Vector3f();
+	/** Where this body's pad sits from the launch site's origin, engine units. */
+	private final Vector3f siteOffset = new Vector3f();
 	private final List<Vector3f[]> cords = new ArrayList<>();
 	private Vector3f[] canopyPositions = new Vector3f[0];
 	private Quaternionf[] canopyRotations = new Quaternionf[0];
@@ -178,6 +180,11 @@ final class ReplayBody {
 		return deployments.isEmpty() ? Double.NaN : deployments.get(0).time();
 	}
 
+	/** Moves the body's whole flight by a fixed offset, engine units, as when it flies from another pad. */
+	void setSiteOffset(Vector3f offset) {
+		siteOffset.set(offset);
+	}
+
 	/** Pivot position in the launch-site frame from the last update. */
 	Vector3f getSitePivot() {
 		return sitePivot;
@@ -286,7 +293,7 @@ final class ReplayBody {
 		}
 
 		Vector3f position = data.getPose().getPosition(t);
-		sitePivot.set(position).add(0, (float) (offset * S), 0);
+		sitePivot.set(position).add(0, (float) (offset * S), 0).add(siteOffset);
 		// The simulation lands the body at zero altitude, so let the height part of the shift go
 		// as it touches down.
 		float settle = (float) landingSettle(t);
