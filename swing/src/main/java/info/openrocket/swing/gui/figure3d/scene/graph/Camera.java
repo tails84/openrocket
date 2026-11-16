@@ -41,8 +41,8 @@ public class Camera {
 	private float orthographicViewHeight;
 	private float roll;
 	private float aspectRatio;
-	private final float zNear;
-	private final float zFar;
+	private float zNear;
+	private float zFar;
 
 	/**
 	 * Creates a camera with a perspective projection.
@@ -147,6 +147,19 @@ public class Camera {
 	/** Height of the orthographic view volume in world units, or 0 with a perspective projection. */
 	public float getOrthographicViewHeight() {
 		return orthographicViewHeight;
+	}
+
+	/**
+	 * Replaces the clipping planes given to the builder. The near plane still shrinks with the
+	 * orbit distance for close inspection, and the far plane still grows with it.
+	 *
+	 * @param zNear largest near plane distance, in world units
+	 * @param zFar  smallest far plane distance, in world units
+	 */
+	public void setClippingPlanes(float zNear, float zFar) {
+		this.zNear = zNear;
+		this.zFar = zFar;
+		updateProjectionMatrix();
 	}
 
 	/** Near clipping plane distance of the current projection. */
