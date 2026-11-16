@@ -20,8 +20,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 
 /**
- * The launch site the replay flies from: a mown launch area with a line of pads and rails, the
- * launch control tent and a windsock. Round a site it has a survey of (see {@link SiteSurvey}) the
+ * The launch site the replay flies from: a mown launch area with a line of pads and rails, a line
+ * of tents for launch control and the club behind them, and a windsock. Round a site it has a survey of (see {@link SiteSurvey}) the
  * paddocks, river, roads, woods, houses and hills are drawn where they really are; anywhere else
  * it is a made-up grass paddock with gum trees, a track and a dam, and low hills on the horizon.
  *
@@ -41,6 +41,11 @@ final class LaunchSite {
 	static final double TAIL_STANDOFF = 0.05;
 	/** Distance from the rail's surface to the rocket's, the height of a rail button, metres. */
 	static final double BUTTON_HEIGHT = 0.006;
+	/** Distance from the pads to the line of tents, metres. */
+	static final double TENT_LINE = 30;
+	/** Tents either side of the launch control tent, and the distance between tents, metres. */
+	private static final int TENTS_EACH_SIDE = 3;
+	private static final double TENT_SPACING = 6.5;
 	/** Pads before and after the main pad along the row. */
 	private static final int PADS_BEFORE = 1;
 	private static final int PADS_AFTER = 2;
@@ -66,7 +71,10 @@ final class LaunchSite {
 	private static final float[] RAIL = { 0.74f, 0.75f, 0.78f };
 	private static final float[] PLATE = { 0.33f, 0.33f, 0.34f };
 	private static final float[] STAND = { 0.20f, 0.20f, 0.22f };
-	private static final float[] TENT_ROOF = { 0.05f, 0.33f, 0.60f };
+	/** Gazebo roofs: launch control's first, then the club's and families' along the line. */
+	private static final float[][] TENT_ROOFS = { { 0.05f, 0.33f, 0.60f }, { 0.88f, 0.88f, 0.86f },
+			{ 0.62f, 0.12f, 0.10f }, { 0.13f, 0.40f, 0.22f }, { 0.85f, 0.66f, 0.12f }, { 0.10f, 0.14f, 0.30f },
+			{ 0.55f, 0.56f, 0.58f } };
 	private static final float[] TENT_FRAME = { 0.82f, 0.82f, 0.82f };
 	private static final float[] TABLE = { 0.90f, 0.90f, 0.88f };
 	private static final float[] CONTROLLER = { 0.12f, 0.12f, 0.13f };
@@ -113,6 +121,8 @@ final class LaunchSite {
 	private final SiteSurvey survey;
 	private final double fieldHalf;
 	private final double[][] track;
+	/** The track in site coordinates (r, d), from the survey or made up, to draw close up. */
+	private final double[][] trackLine;
 	private final double[] dam;
 	private final double[] mown;
 	/** Squares of close-up grass: first r, last r, first d, last d, metres. */
@@ -135,7 +145,8 @@ final class LaunchSite {
 	 * @param windSpeed  wind speed at the ground, m/s
 	 * @param landings   where things come down, as (r, d) in metres, to get close-up grass too
 	 * @param survey     the ground round a known launch site, or null for a made-up paddock; a
-	 *                   surveyed site expects row to point east and depth south
+	 *                   surveyed site expects row and depth from its {@link SiteSurvey#rowDirection()}
+	 *                   and {@link SiteSurvey#spectatorDirection()}
 	 */
 	LaunchSite(Vector3f row, Vector3f depth, Vector3f toSun, double padSpacing, Vector3f railAxis, double railLength,
 			double railWidth, double railOffset, double windFrom, double windSpeed, List<double[]> landings,
@@ -153,10 +164,10 @@ final class LaunchSite {
 		this.windFrom = windFrom;
 		this.windSpeed = Double.isFinite(windSpeed) ? windSpeed : 0;
 
-		// The mown launch area: the pads with room around them, and the way to the tent.
-		double first = -PADS_BEFORE * padSpacing - 8;
-		double last = PADS_AFTER * padSpacing + 8;
-		this.mown = new double[] { snap(first, -1), snap(last, 1), -8, 30 };
+		// The mown launch area: the pads with room around them, and the line of tents behind.
+		double first = Math.min(-PADS_BEFORE * padSpacing - 8, tentPosition(-TENTS_EACH_SIDE) - 4);
+		double last = Math.max(PADS_AFTER * padSpacing + 8, tentPosition(TENTS_EACH_SIDE) + 4);
+		this.mown = new double[] { snap(first, -1), snap(last, 1), -8, snap(TENT_LINE + 4, 1) };
 		this.landings = new ArrayList<>();
 		patches.add(new double[] { -NEAR_HALF, NEAR_HALF, -NEAR_HALF, NEAR_HALF });
 		// Past a surveyed site's paddock image the hills take over, which have no close-up grass.
@@ -172,6 +183,15 @@ final class LaunchSite {
 		this.track = new double[][] { { -1100, 420 }, { -760, 330 }, { -420, 240 }, { -180, 150 }, { -40, 110 },
 				{ 120, 96 }, { 330, 130 }, { 600, 230 }, { 1100, 260 } };
 		this.dam = new double[] { 310, -370, 24 };
+		if (survey != null) {
+			double[][] surveyed = survey.track();
+			this.trackLine = new double[surveyed.length][];
+			for (int i = 0; i < surveyed.length; i++) {
+				this.trackLine[i] = new double[] { surveyed[i][0], -surveyed[i][1] };
+			}
+		} else {
+			this.trackLine = track;
+		}
 		if (survey != null) {
 			plantSurveyedTrees();
 			buildHouses();
@@ -325,7 +345,7 @@ final class LaunchSite {
 		addGround(pieces, painted);
 		addGrassBlades(pieces, painted.blades());
 		addPads(pieces);
-		addTent(pieces);
+		addTents(pieces);
 		addWindsock(pieces);
 		addTrees(pieces);
 		if (survey != null) {
@@ -338,28 +358,56 @@ final class LaunchSite {
 		return pieces;
 	}
 
+	// Ground textures, in the order groundAreas() gives them
+	private static final int LONG_GRASS = 0;
+	private static final int MOWN_GRASS = 1;
+	private static final int PADDOCK = 2;
+	private static final int COUNTRY = 3;
+	private static final int TRACK = 4;
+	/** Close-up ground squares this near the track's centre line show the track, metres. */
+	private static final double TRACK_CORE = 2;
+
 	/**
 	 * Lays the ground as squares that halve wherever they meet a patch of close-up grass or the
 	 * edge of the paddock image, so each square carries one texture and none overlap.
 	 */
 	private void addGround(List<Piece> pieces, LaunchSiteImages.Images painted) {
-		GroundBuilder longGrass = new GroundBuilder(1 / LaunchSiteImages.DETAIL_TILE, 0);
-		GroundBuilder mownGrass = new GroundBuilder(1 / LaunchSiteImages.DETAIL_TILE, 0);
-		GroundBuilder paddock = new GroundBuilder(1 / (2 * fieldHalf), fieldHalf);
-		GroundBuilder country = new GroundBuilder(1 / LaunchSiteImages.FAR_TILE, 0);
-		layGround(-GROUND_HALF, -GROUND_HALF, 2 * GROUND_HALF, longGrass, mownGrass, paddock, country);
-		pieces.add(new Piece(longGrass.build(), ground(painted.longGrass(), Appearance3D.TextureMode.REPEAT)));
-		pieces.add(new Piece(mownGrass.build(), ground(painted.mownGrass(), Appearance3D.TextureMode.REPEAT)));
-		pieces.add(new Piece(paddock.build(), ground(painted.field(), Appearance3D.TextureMode.STRETCH)));
-		pieces.add(new Piece(country.build(), ground(painted.far(), Appearance3D.TextureMode.REPEAT)));
+		double detail = 1 / LaunchSiteImages.DETAIL_TILE;
+		GroundBuilder[] ground = {
+				new GroundBuilder((r, d) -> new Vector2f((float) (r * detail), (float) (d * detail))),
+				new GroundBuilder((r, d) -> new Vector2f((float) (r * detail), (float) (d * detail))),
+				new GroundBuilder((r, d) -> new Vector2f((float) ((r + fieldHalf) / (2 * fieldHalf)),
+						(float) ((d + fieldHalf) / (2 * fieldHalf)))),
+				new GroundBuilder((r, d) -> new Vector2f((float) (r / LaunchSiteImages.FAR_TILE),
+						(float) (d / LaunchSiteImages.FAR_TILE))),
+				// Across the track and along it, so the ruts follow its bends.
+				new GroundBuilder((r, d) -> {
+					double[] onTrack = trackCoordinates(r, d);
+					return new Vector2f((float) (onTrack[0] / LaunchSiteImages.TRACK_ACROSS + 0.5),
+							(float) (onTrack[1] * detail));
+				}) };
+		layGround(-GROUND_HALF, -GROUND_HALF, 2 * GROUND_HALF, ground);
+		pieces.add(new Piece(ground[LONG_GRASS].build(), ground(painted.longGrass(), Appearance3D.TextureMode.REPEAT)));
+		pieces.add(new Piece(ground[MOWN_GRASS].build(), ground(painted.mownGrass(), Appearance3D.TextureMode.REPEAT)));
+		pieces.add(new Piece(ground[PADDOCK].build(), ground(painted.field(), Appearance3D.TextureMode.STRETCH)));
+		pieces.add(new Piece(ground[COUNTRY].build(), ground(painted.far(), Appearance3D.TextureMode.REPEAT)));
+		if (!ground[TRACK].isEmpty()) {
+			pieces.add(new Piece(ground[TRACK].build(), ground(painted.track(), Appearance3D.TextureMode.REPEAT)));
+		}
 	}
 
-	/** Ground area under each texture, square metres: long grass, mown grass, paddock, country. */
+	/** Ground area under each texture, square metres: long grass, mown grass, paddock, country, track. */
 	double[] groundAreas() {
-		GroundBuilder[] builders = { new GroundBuilder(1, 0), new GroundBuilder(1, 0), new GroundBuilder(1, 0),
-				new GroundBuilder(1, 0) };
-		layGround(-GROUND_HALF, -GROUND_HALF, 2 * GROUND_HALF, builders[0], builders[1], builders[2], builders[3]);
-		return new double[] { builders[0].area, builders[1].area, builders[2].area, builders[3].area };
+		GroundBuilder[] builders = new GroundBuilder[5];
+		for (int i = 0; i < builders.length; i++) {
+			builders[i] = new GroundBuilder((r, d) -> new Vector2f());
+		}
+		layGround(-GROUND_HALF, -GROUND_HALF, 2 * GROUND_HALF, builders);
+		double[] areas = new double[builders.length];
+		for (int i = 0; i < builders.length; i++) {
+			areas[i] = builders[i].area;
+		}
+		return areas;
 	}
 
 	/** The mown launch area: first r, last r, first d, last d, metres. */
@@ -367,8 +415,7 @@ final class LaunchSite {
 		return mown.clone();
 	}
 
-	private void layGround(double r, double d, double size, GroundBuilder longGrass, GroundBuilder mownGrass,
-			GroundBuilder paddock, GroundBuilder country) {
+	private void layGround(double r, double d, double size, GroundBuilder[] ground) {
 		double field = fieldHalf;
 		boolean straddlesField = r < field && r + size > -field && d < field && d + size > -field
 				&& !(r >= -field && r + size <= field && d >= -field && d + size <= field);
@@ -390,31 +437,51 @@ final class LaunchSite {
 				insidePatch |= r >= patch[0] && r + size <= patch[1] && d >= patch[2] && d + size <= patch[3];
 			}
 		}
-		if (size > GRID && (straddlesField || touchesPatch && !insidePatch)) {
+		boolean split = size > GRID && (straddlesField || touchesPatch && !insidePatch);
+		int target = -1;
+		if (!split && insidePatch) {
+			// Close up, the track shows down to its ruts; then the mown launch area, then long grass.
+			double fromTrack = Math.abs(trackCoordinates(r + size / 2, d + size / 2)[0]);
+			boolean isMown = r >= mown[0] && r + size <= mown[1] && d >= mown[2] && d + size <= mown[3];
+			boolean partMown = !isMown && r < mown[1] && r + size > mown[0] && d < mown[3] && d + size > mown[2];
+			if (size > GRID && (fromTrack < TRACK_CORE + size * 0.71 || partMown)) {
+				split = true;
+			} else {
+				target = fromTrack < TRACK_CORE ? TRACK : isMown ? MOWN_GRASS : LONG_GRASS;
+			}
+		}
+		if (split) {
 			double half = size / 2;
-			layGround(r, d, half, longGrass, mownGrass, paddock, country);
-			layGround(r + half, d, half, longGrass, mownGrass, paddock, country);
-			layGround(r, d + half, half, longGrass, mownGrass, paddock, country);
-			layGround(r + half, d + half, half, longGrass, mownGrass, paddock, country);
+			layGround(r, d, half, ground);
+			layGround(r + half, d, half, ground);
+			layGround(r, d + half, half, ground);
+			layGround(r + half, d + half, half, ground);
 			return;
 		}
-		GroundBuilder target;
-		if (insidePatch) {
-			boolean isMown = r >= mown[0] && r + size <= mown[1] && d >= mown[2] && d + size <= mown[3];
-			if (!isMown && size > GRID && r < mown[1] && r + size > mown[0] && d < mown[3] && d + size > mown[2]) {
-				// Part mown: split until each square is one or the other.
-				double half = size / 2;
-				layGround(r, d, half, longGrass, mownGrass, paddock, country);
-				layGround(r + half, d, half, longGrass, mownGrass, paddock, country);
-				layGround(r, d + half, half, longGrass, mownGrass, paddock, country);
-				layGround(r + half, d + half, half, longGrass, mownGrass, paddock, country);
-				return;
-			}
-			target = isMown ? mownGrass : longGrass;
-		} else {
-			target = r >= -field && r + size <= field && d >= -field && d + size <= field ? paddock : country;
+		if (target < 0) {
+			target = r >= -field && r + size <= field && d >= -field && d + size <= field ? PADDOCK : COUNTRY;
 		}
-		target.rectangle(r, d, r + size, d + size);
+		ground[target].rectangle(r, d, r + size, d + size);
+	}
+
+	/** Distance across the track (signed) and along it from its first point, metres, of a point in site coordinates. */
+	private double[] trackCoordinates(double r, double d) {
+		double best = Double.MAX_VALUE, across = Double.MAX_VALUE, along = 0, start = 0;
+		for (int k = 0; k + 1 < trackLine.length; k++) {
+			double ar = trackLine[k][0], ad = trackLine[k][1];
+			double br = trackLine[k + 1][0] - ar, bd = trackLine[k + 1][1] - ad;
+			double length = Math.hypot(br, bd);
+			double t = Math.max(0, Math.min(1, ((r - ar) * br + (d - ad) * bd) / (length * length)));
+			double pr = r - ar - t * br, pd = d - ad - t * bd;
+			double distance = Math.hypot(pr, pd);
+			if (distance < best) {
+				best = distance;
+				across = Math.copySign(distance, br * pd - bd * pr);
+				along = start + t * length;
+			}
+			start += length;
+		}
+		return new double[] { across, along };
 	}
 
 	private static Appearance3D ground(ByteBuffer image, Appearance3D.TextureMode mode) {
@@ -424,18 +491,20 @@ final class LaunchSite {
 		return appearance;
 	}
 
-	/** Level ground quads in site coordinates, with texture coordinates from position. */
+	/** Texture coordinates for a point in site coordinates. */
+	private interface GroundUv {
+		Vector2f at(double r, double d);
+	}
+
+	/** Level ground quads in site coordinates. */
 	private final class GroundBuilder {
 		private final List<Vertex> vertices = new ArrayList<>();
 		private final IntList indices = new IntList();
-		private final double perMetre;
-		private final double offset;
+		private final GroundUv uv;
 		private double area;
 
-		/** Texture coordinates are (r + offset, d + offset) times {@code perMetre}. */
-		GroundBuilder(double perMetre, double offset) {
-			this.perMetre = perMetre;
-			this.offset = offset;
+		GroundBuilder(GroundUv uv) {
+			this.uv = uv;
 		}
 
 		void rectangle(double r0, double d0, double r1, double d1) {
@@ -444,9 +513,7 @@ final class LaunchSite {
 			double[][] corners = { { r0, d0 }, { r1, d0 }, { r1, d1 }, { r0, d1 } };
 			for (double[] corner : corners) {
 				Vector3f position = site(corner[0], 0, corner[1]).mul(S);
-				Vector2f uv = new Vector2f((float) ((corner[0] + offset) * perMetre),
-						(float) ((corner[1] + offset) * perMetre));
-				vertices.add(new Vertex(position, new Vector3f(0, 1, 0), uv, OUTSIDE));
+				vertices.add(new Vertex(position, new Vector3f(0, 1, 0), uv.at(corner[0], corner[1]), OUTSIDE));
 			}
 			// Face up whichever way round row and depth turn.
 			boolean upward = new Vector3f(row).cross(depth).y < 0;
@@ -457,6 +524,10 @@ final class LaunchSite {
 				indices.addTriangle(base, base + 1, base + 2);
 				indices.addTriangle(base, base + 2, base + 3);
 			}
+		}
+
+		boolean isEmpty() {
+			return vertices.isEmpty();
 		}
 
 		Mesh build() {
@@ -493,7 +564,10 @@ final class LaunchSite {
 			double d = centreD + (random.nextDouble() * 2 - 1) * reach;
 			double distance = Math.hypot(r - centreR, d - centreD);
 			boolean inMown = r > mown[0] - 0.3 && r < mown[1] + 0.3 && d > mown[2] - 0.3 && d < mown[3] + 0.3;
-			if (inMown || random.nextDouble() < LaunchSiteImages.smoothstep(thick, reach, distance)) {
+			// Nothing grows in the wheel ruts.
+			double fromTrack = Math.abs(trackCoordinates(r, d)[0]);
+			boolean inRut = Math.abs(fromTrack - 0.8) < 0.35;
+			if (inMown || inRut || random.nextDouble() < LaunchSiteImages.smoothstep(thick, reach, distance)) {
 				continue;
 			}
 			float u = (random.nextInt(LaunchSiteImages.BLADE_VARIANTS) + 0.5f) / LaunchSiteImages.BLADE_VARIANTS;
@@ -561,37 +635,53 @@ final class LaunchSite {
 		pieces.add(toned(stands, STAND));
 	}
 
-	/** The launch control tent with its table, towards the spectators and off to one side. */
-	private void addTent(List<Piece> pieces) {
-		double r = -PADS_BEFORE * padSpacing - 4, d = 24;
+	/** Where tent {@code k} of the line stands along the row, metres: 0 is launch control's, behind the pads. */
+	private double tentPosition(int k) {
+		return 0.5 * (PADS_AFTER - PADS_BEFORE) * padSpacing + k * TENT_SPACING;
+	}
+
+	/**
+	 * The line of gazebos behind the pads, towards the spectators: launch control's in the middle
+	 * with its table and launch controller, the club's and families' either side.
+	 */
+	private void addTents(List<Piece> pieces) {
 		ToneMeshBuilder frame = new ToneMeshBuilder(toSun, 1);
-		ToneMeshBuilder roof = new ToneMeshBuilder(toSun, 1);
+		ToneMeshBuilder roof = new ToneMeshBuilder(toSun, TENT_ROOFS.length);
 		ToneMeshBuilder table = new ToneMeshBuilder(toSun, 1);
 		ToneMeshBuilder controller = new ToneMeshBuilder(toSun, 1);
 		float half = 1.5f, eave = 2.25f, peak = 2.95f;
-		for (int corner = 0; corner < 4; corner++) {
-			double cr = r + ((corner & 1) == 0 ? -half : half), cd = d + ((corner & 2) == 0 ? -half : half);
-			frame.levelBox(site(cr, eave / 2, cd), row, 0.018f, 0.018f, eave / 2);
+		double d = TENT_LINE;
+		for (int k = -TENTS_EACH_SIDE; k <= TENTS_EACH_SIDE; k++) {
+			double r = tentPosition(k);
+			roof.variant(Math.floorMod(k, TENT_ROOFS.length));
+			for (int corner = 0; corner < 4; corner++) {
+				double cr = r + ((corner & 1) == 0 ? -half : half), cd = d + ((corner & 2) == 0 ? -half : half);
+				frame.levelBox(site(cr, eave / 2, cd), row, 0.018f, 0.018f, eave / 2);
+			}
+			Vector3f top = site(r, peak, d);
+			Vector3f[] corners = { site(r - half - 0.05, eave, d - half - 0.05), site(r + half + 0.05, eave, d - half - 0.05),
+					site(r + half + 0.05, eave, d + half + 0.05), site(r - half - 0.05, eave, d + half + 0.05) };
+			for (int i = 0; i < 4; i++) {
+				Vector3f a = corners[i], b = corners[(i + 1) % 4];
+				// Roof panels face out and down from inside; the valance hangs below the eave.
+				roof.twoSidedQuad(a, b, top, top);
+				Vector3f below = new Vector3f(0, -0.25f, 0);
+				roof.twoSidedQuad(a, b, new Vector3f(b).add(below), new Vector3f(a).add(below));
+			}
+			if (k == 0 || k == -2 || k == 2) {
+				table.levelBox(site(r, 0.72, d - 0.4), row, 0.9f, 0.37f, 0.02f);
+				for (int leg = 0; leg < 4; leg++) {
+					double lr = r + ((leg & 1) == 0 ? -0.82 : 0.82), ld = d - 0.4 + ((leg & 2) == 0 ? -0.3 : 0.3);
+					table.levelBox(site(lr, 0.35, ld), row, 0.015f, 0.015f, 0.35f);
+				}
+			}
+			if (k == 0) {
+				controller.levelBox(site(r - 0.3, 0.80, d - 0.45), row, 0.13f, 0.08f, 0.06f);
+				controller.levelBox(site(r + 0.35, 0.84, d - 0.35), row, 0.11f, 0.09f, 0.10f);
+			}
 		}
-		Vector3f top = site(r, peak, d);
-		Vector3f[] corners = { site(r - half - 0.05, eave, d - half - 0.05), site(r + half + 0.05, eave, d - half - 0.05),
-				site(r + half + 0.05, eave, d + half + 0.05), site(r - half - 0.05, eave, d + half + 0.05) };
-		for (int i = 0; i < 4; i++) {
-			Vector3f a = corners[i], b = corners[(i + 1) % 4];
-			// Roof panels face out and down from inside; the valance hangs below the eave.
-			roof.twoSidedQuad(a, b, top, top);
-			Vector3f below = new Vector3f(0, -0.25f, 0);
-			roof.twoSidedQuad(a, b, new Vector3f(b).add(below), new Vector3f(a).add(below));
-		}
-		table.levelBox(site(r, 0.72, d - 0.4), row, 0.9f, 0.37f, 0.02f);
-		for (int leg = 0; leg < 4; leg++) {
-			double lr = r + ((leg & 1) == 0 ? -0.82 : 0.82), ld = d - 0.4 + ((leg & 2) == 0 ? -0.3 : 0.3);
-			table.levelBox(site(lr, 0.35, ld), row, 0.015f, 0.015f, 0.35f);
-		}
-		controller.levelBox(site(r - 0.3, 0.80, d - 0.45), row, 0.13f, 0.08f, 0.06f);
-		controller.levelBox(site(r + 0.35, 0.84, d - 0.35), row, 0.11f, 0.09f, 0.10f);
 		pieces.add(toned(frame, TENT_FRAME));
-		pieces.add(toned(roof, TENT_ROOF));
+		pieces.add(toned(roof, TENT_ROOFS));
 		pieces.add(toned(table, TABLE));
 		pieces.add(toned(controller, CONTROLLER));
 	}

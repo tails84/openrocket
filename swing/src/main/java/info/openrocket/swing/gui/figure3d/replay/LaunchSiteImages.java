@@ -22,6 +22,10 @@ final class LaunchSiteImages {
 	/** Close-up grass: pixels across and the metres one tile covers. */
 	static final int DETAIL_PIXELS = 1024;
 	static final double DETAIL_TILE = 3.0;
+	/** Width of the dirt track's close-up image, metres: two grass tiles across, ruts in the middle. */
+	static final double TRACK_ACROSS = 2 * DETAIL_TILE;
+	/** Distance between the centres of the track's wheel ruts, metres. */
+	private static final double RUT_GAUGE = 1.6;
 	/** The paddock around the site, one image without repeats: pixels across. */
 	static final int FIELD_PIXELS = 2048;
 	/** The country beyond the paddock, repeating: pixels across and metres one tile covers. */
@@ -69,7 +73,7 @@ final class LaunchSiteImages {
 
 	/** The images, as TGA file data; the country over a surveyed site's hills, or null. */
 	record Images(ByteBuffer longGrass, ByteBuffer mownGrass, ByteBuffer field, ByteBuffer far, ByteBuffer blades,
-			ByteBuffer terrain) {
+			ByteBuffer terrain, ByteBuffer track) {
 	}
 
 	private LaunchSiteImages() {
@@ -81,12 +85,13 @@ final class LaunchSiteImages {
 		BufferedImage longGrass = longGrass(plan.seed(), dry);
 		// Drawn from a distance the close-up grass looks a shade darker than its average.
 		float[] mean = scale(mean(longGrass), 0.94f);
+		ByteBuffer track = tga(track(longGrass, plan.seed() + 2));
 		if (plan.survey() != null) {
 			return new Images(tga(longGrass), tga(mownGrass(plan.seed() + 1, dry)), tga(SurveyImages.field(plan, mean)),
-					tga(far(plan.seed())), tga(blades(dry)), tga(SurveyImages.terrain(plan, plan.toSun())));
+					tga(far(plan.seed())), tga(blades(dry)), tga(SurveyImages.terrain(plan, plan.toSun())), track);
 		}
 		return new Images(tga(longGrass), tga(mownGrass(plan.seed() + 1, dry)), tga(field(plan, mean)), tga(far(plan.seed())),
-				tga(blades(dry)), null);
+				tga(blades(dry)), null, track);
 	}
 
 	// ---------- close-up grass ----------
@@ -149,6 +154,43 @@ final class LaunchSiteImages {
 			}
 		}
 		return image;
+	}
+
+	/**
+	 * The dirt track close up: two bare wheel ruts along the image's columns, the strip between
+	 * them grazed shorter, and the long grass either side. It repeats along the track every
+	 * {@link #DETAIL_TILE} and spans {@link #TRACK_ACROSS} across it.
+	 */
+	private static BufferedImage track(BufferedImage longGrass, long seed) {
+		int n = DETAIL_PIXELS;
+		int width = 2 * n;
+		double perMetre = n / DETAIL_TILE;
+		ValueNoise wobble = new ValueNoise(seed + 41, 8);
+		ValueNoise grain = new ValueNoise(seed + 42, 256);
+		ValueNoise stones = new ValueNoise(seed + 43, 256);
+		BufferedImage image = new BufferedImage(width, n, BufferedImage.TYPE_INT_RGB);
+		for (int j = 0; j < n; j++) {
+			double along = (j + 0.5) / n;
+			// The ruts wander a little from side to side, the same way in both.
+			double shift = 0.08 * (wobble.periodic(along * 8, 2.5) - 0.5);
+			for (int i = 0; i < width; i++) {
+				double across = (i + 0.5) / perMetre - TRACK_ACROSS / 2 - shift;
+				double fromRut = Math.abs(Math.abs(across) - RUT_GAUGE / 2);
+				double rough = grain.periodic(i / 4.0, j / 4.0);
+				double bare = 1 - smoothstep(0.13, 0.30, fromRut + 0.08 * (rough - 0.5));
+				int grass = longGrass.getRGB(i % n, j);
+				if (Math.abs(across) < RUT_GAUGE / 2 - 0.15) {
+					grass = gain(grass, 1.05f);	// grazed shorter between the ruts
+				}
+				float[] dirt = scale(mix(RUT, SOIL, (float) rough), (float) (0.88 + 0.22 * stones.periodic(i / 2.0, j / 2.0)));
+				image.setRGB(i, j, bare <= 0 ? grass : rgb(mix(colour(grass), dirt, (float) bare)));
+			}
+		}
+		return image;
+	}
+
+	private static float[] colour(int rgb) {
+		return new float[] { ((rgb >> 16) & 0xFF) / 255f, ((rgb >> 8) & 0xFF) / 255f, (rgb & 0xFF) / 255f };
 	}
 
 	private static void strokeWrapped(Graphics2D g, int n, double x0, double y0, double x1, double y1, float width,

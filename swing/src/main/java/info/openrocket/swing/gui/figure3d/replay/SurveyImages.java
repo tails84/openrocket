@@ -11,7 +11,8 @@ import static info.openrocket.swing.gui.figure3d.replay.LaunchSiteImages.smooths
  * Paints the ground round a surveyed launch site from its land cover: the paddock image near the
  * pads, and the country out to the hills with the slopes shaded for the sun.
  *
- * <p>Site coordinates run east (r) and south (d) of the launch area, in metres.</p>
+ * <p>Site coordinates run along the line of pads (r) and towards the spectators (d) from the main
+ * pad, in metres; {@link SiteSurvey} takes them as (r, -d).</p>
  */
 final class SurveyImages {
 	/** The country image: pixels across, covering the whole survey. */
@@ -43,7 +44,7 @@ final class SurveyImages {
 	private SurveyImages() {
 	}
 
-	/** Colour of a land cover class at a point, metres east and south. */
+	/** Colour of a land cover class at a point in site coordinates. */
 	private static float[] cover(int kind, double r, double d, LaunchSiteImages.ValueNoise[] noise, double scale) {
 		double patches = noise[0].fbm(r / 600 + 7, d / 600 + 3, 3);
 		double clumps = noise[1].fbm(r / 40, d / 40, 2);

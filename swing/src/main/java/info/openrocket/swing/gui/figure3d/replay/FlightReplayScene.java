@@ -144,6 +144,11 @@ final class FlightReplayScene {
 	private final LaunchSite site;
 	/** Where the main pad stands, under the rocket's aft end, engine units. */
 	private final Vector3f padCentre;
+	/** Level directions along the line of pads, and from the pads to the spectators. */
+	private final Vector3f row;
+	private final Vector3f observer;
+	/** Whether the site is one the replay has a survey of. */
+	private final boolean surveyed;
 
 	private final Map<SceneObject, Matrix4f> baseTransforms = new IdentityHashMap<>();
 	private final Map<SceneObject, Part> parts = new IdentityHashMap<>();
@@ -237,9 +242,12 @@ final class FlightReplayScene {
 		// The site is laid out about the main pad, under the rocket's aft end.
 		Vector3f tail = new Vector3f(launchAxis).mul((float) (-(length - launchCg) * S));
 		this.padCentre = new Vector3f(tail.x, 0, tail.z);
-		// Pads in a row running east, spectators to the south, whichever way the rail leans.
-		Vector3f observer = observerDirection();
-		Vector3f row = new Vector3f(1, 0, 0);
+		// Pads in a row with the spectators to one side, whichever way the rail leans: at a surveyed
+		// site as the club sets them out, elsewhere a row running east with the spectators south.
+		SiteSurvey survey = SiteSurvey.near(launchLatitude, launchLongitude);
+		this.row = survey != null ? survey.rowDirection() : new Vector3f(1, 0, 0);
+		this.observer = survey != null ? survey.spectatorDirection() : new Vector3f(0, 0, 1);
+		this.surveyed = survey != null;
 		List<double[]> landings = new ArrayList<>();
 		for (FlightReplayData data : branches) {
 			if (!Double.isNaN(data.getGroundHitTime())) {
@@ -252,8 +260,7 @@ final class FlightReplayScene {
 		this.site = new LaunchSite(row, observer, sunDirection(), Math.max(PAD_SPACING, 1.25 * length), launchAxis,
 				Math.max(railLength, 0.3), railWidth, bodyRadius + LaunchSite.BUTTON_HEIGHT + railWidth / 2,
 				mainData.getValue(FlightDataType.TYPE_WIND_DIRECTION, liftoff),
-				mainData.getValue(FlightDataType.TYPE_WIND_VELOCITY, liftoff), landings,
-				SiteSurvey.near(launchLatitude, launchLongitude));
+				mainData.getValue(FlightDataType.TYPE_WIND_VELOCITY, liftoff), landings, survey);
 	}
 
 	// ---------- rocket geometry ----------
@@ -965,15 +972,13 @@ final class FlightReplayScene {
 		camera.setDistance(distance);
 	}
 
-	/** A spectator standing beside the pad, off to the side of the launch direction. */
+	/**
+	 * A spectator off to the side of the pads: at a surveyed site in front of the line of tents,
+	 * elsewhere further back for bigger rockets.
+	 */
 	private Vector3f observerSitePosition() {
-		double distance = Math.max(30, Math.min(150, 25 * length));
-		return observerDirection().mul((float) (distance * S)).add(0, (float) (OBSERVER_EYE_HEIGHT * S), 0);
-	}
-
-	/** Level direction from the pads to the spectators: south, towards the road at the surveyed site. */
-	private static Vector3f observerDirection() {
-		return new Vector3f(0, 0, 1);
+		double distance = surveyed ? LaunchSite.TENT_LINE - 3 : Math.max(30, Math.min(150, 25 * length));
+		return new Vector3f(observer).mul((float) (distance * S)).add(0, (float) (OBSERVER_EYE_HEIGHT * S), 0);
 	}
 
 	// ---------- helpers ----------

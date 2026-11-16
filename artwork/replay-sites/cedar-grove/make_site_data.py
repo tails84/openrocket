@@ -1,6 +1,6 @@
 """
 Builds the Cedar Grove (QRS launch site LA2) survey data the flight replay draws its
-surroundings from, as rasters on a local grid centred on the launch area:
+surroundings from, as rasters on a local grid centred near the launch area:
 
   landcover_near.png  class per 4 m cell, +-3200 m  (from OpenStreetMap tiles at zoom 15)
   landcover_far.png   class per 32 m cell, +-16384 m (from OpenStreetMap tiles at zoom 12)
@@ -21,7 +21,7 @@ from PIL import Image
 from scipy import ndimage
 from skimage.morphology import skeletonize
 
-PAD_LAT, PAD_LON = -27.84968, 152.96084  # launch area, QRS LA2
+PAD_LAT, PAD_LON = -27.84968, 152.96084  # centre of the grids, near QRS LA2; SiteSurvey places the pads
 
 # Classes, in the order the Java side reads them. Roads are kept as centre lines one cell wide,
 # and narrow water (creeks and gullies) is told apart from the river and dams.

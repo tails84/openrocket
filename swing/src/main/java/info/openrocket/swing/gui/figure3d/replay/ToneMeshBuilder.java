@@ -68,18 +68,22 @@ final class ToneMeshBuilder {
 		indices.addTriangle(a, b, c);
 	}
 
-	/** A flat quad, corners counter-clockwise seen from the side it faces. */
+	/** A flat quad, corners counter-clockwise seen from the side it faces; c and d may be the same point. */
 	void quad(Vector3f a, Vector3f b, Vector3f c, Vector3f d) {
-		Vector3f normal = new Vector3f(b).sub(a).cross(new Vector3f(c).sub(a)).normalize();
+		quad(a, b, c, d, new Vector3f(b).sub(a).cross(new Vector3f(c).sub(a)).normalize());
+	}
+
+	private void quad(Vector3f a, Vector3f b, Vector3f c, Vector3f d, Vector3f normal) {
 		int i = vertex(a, normal), j = vertex(b, normal), k = vertex(c, normal), l = vertex(d, normal);
 		triangle(i, j, k);
 		triangle(i, k, l);
 	}
 
-	/** A quad seen from both sides. */
+	/** A quad seen from both sides; c and d may be the same point. */
 	void twoSidedQuad(Vector3f a, Vector3f b, Vector3f c, Vector3f d) {
-		quad(a, b, c, d);
-		quad(a, d, c, b);
+		Vector3f normal = new Vector3f(b).sub(a).cross(new Vector3f(c).sub(a)).normalize();
+		quad(a, b, c, d, normal);
+		quad(a, d, c, b, new Vector3f(normal).negate());
 	}
 
 	/** A box from its centre and three half-extent vectors, which should be square to each other. */

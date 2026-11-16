@@ -1,16 +1,22 @@
 package info.openrocket.swing.gui.figure3d.replay;
 
+import org.joml.Vector3f;
+
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.awt.image.Raster;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
  * What the ground is like round a launch site the replay knows: the land cover near the pads and
- * out to the hills, and the height of the ground, on a grid centred on the launch area with
- * rows running north to south. Positions are in metres east and north of the launch area.
+ * out to the hills, and the height of the ground, from grids with rows running north to south.
+ *
+ * <p>Positions are in the launch site's own frame, in metres from the main pad: x along the line
+ * of pads, y away from the spectators, out past the pads. The site's {@link #rowDirection()} and
+ * {@link #spectatorDirection()} place that frame on the map.</p>
  *
  * <p>Built by {@code artwork/replay-sites/<site>/make_site_data.py} from OpenStreetMap
  * (&copy; OpenStreetMap contributors, ODbL) and the Terrain Tiles on AWS Open Data.</p>
@@ -46,10 +52,13 @@ final class SiteSurvey {
 	}
 
 	/**
-	 * QRS launch site LA2 at Cedar Grove, Queensland. The crops south of Cedar Grove Road and the
-	 * track into the launch paddock are placed by eye from aerial photographs.
+	 * QRS launch site LA2 at Cedar Grove, Queensland. The flight line runs beside the dirt track
+	 * into the launch paddock, with a line of tents between it and the track and the rockets
+	 * flying out to the west. The crops south of Cedar Grove Road and the track are placed by eye
+	 * from aerial photographs, as metres east and north of the grids' centre.
 	 */
-	private static final Site CEDAR_GROVE = new Site("cedar-grove", -27.84968, 152.96084, 3200, 4, 16_384, 32, 64,
+	private static final Site CEDAR_GROVE = new Site("cedar-grove", -27.84968, 152.96084, -27.850615, 152.962562,
+			8.5, 3200, 4, 16_384, 32, 64,
 			new double[][] { { 165, -376 }, { 190, -200 }, { 215, -30 }, { 245, 180 }, { 270, 363 }, { 363, 426 } },
 			List.of(
 					new Crop(CropKind.PIVOT, new double[][] { { -40, -400 }, { 620, -500 }, { 620, -1180 }, { -160, -1180 } },
@@ -65,9 +74,18 @@ final class SiteSurvey {
 	/** A launch site this close to a surveyed one is taken to be it, metres. */
 	private static final double SAME_SITE = 3000;
 	private static final double HEIGHT_OFFSET = 1000;
+	private static final double METRES_PER_DEGREE_LATITUDE = 110_574;
+	private static final double METRES_PER_DEGREE_LONGITUDE = 111_320;
 
-	private record Site(String folder, double latitude, double longitude, double nearHalf, double nearCell,
-			double farHalf, double farCell, double heightCell, double[][] track, List<Crop> crops) {
+	/**
+	 * @param latitude    centre of the grids
+	 * @param padLatitude where the main pad stands
+	 * @param rowBearing  bearing of the line of pads, degrees clockwise from north, with the
+	 *                    spectators on its right-hand side
+	 */
+	private record Site(String folder, double latitude, double longitude, double padLatitude, double padLongitude,
+			double rowBearing, double nearHalf, double nearCell, double farHalf, double farCell, double heightCell,
+			double[][] track, List<Crop> crops) {
 	}
 
 	private final Site site;
@@ -78,9 +96,19 @@ final class SiteSurvey {
 	private final float[] heights;
 	private final int heightSize;
 	private final double padHeight;
+	/** The main pad from the grids' centre, metres east and north. */
+	private final double padEast;
+	private final double padNorth;
+	private final double sin;
+	private final double cos;
 
 	private SiteSurvey(Site site) throws IOException {
 		this.site = site;
+		this.padNorth = (site.padLatitude() - site.latitude()) * METRES_PER_DEGREE_LATITUDE;
+		this.padEast = (site.padLongitude() - site.longitude()) * METRES_PER_DEGREE_LONGITUDE
+				* Math.cos(Math.toRadians(site.latitude()));
+		this.sin = Math.sin(Math.toRadians(site.rowBearing()));
+		this.cos = Math.cos(Math.toRadians(site.rowBearing()));
 		Raster nearRaster = read(site, "landcover_near.png").getRaster();
 		this.nearSize = nearRaster.getWidth();
 		this.near = bytes(nearRaster);
@@ -95,7 +123,7 @@ final class SiteSurvey {
 				heights[y * heightSize + x] = (float) (heightRaster.getSample(x, y, 0) - HEIGHT_OFFSET);
 			}
 		}
-		this.padHeight = rawHeight(0, 0);
+		this.padHeight = rawHeight(padEast, padNorth);
 	}
 
 	/**
@@ -103,8 +131,9 @@ final class SiteSurvey {
 	 * no site there or its data cannot be read.
 	 */
 	static SiteSurvey near(double latitude, double longitude) {
-		double north = (latitude - CEDAR_GROVE.latitude()) * 110_574;
-		double east = (longitude - CEDAR_GROVE.longitude()) * 111_320 * Math.cos(Math.toRadians(latitude));
+		double north = (latitude - CEDAR_GROVE.padLatitude()) * METRES_PER_DEGREE_LATITUDE;
+		double east = (longitude - CEDAR_GROVE.padLongitude()) * METRES_PER_DEGREE_LONGITUDE
+				* Math.cos(Math.toRadians(latitude));
 		if (!Double.isFinite(north) || !Double.isFinite(east) || Math.hypot(north, east) > SAME_SITE) {
 			return null;
 		}
@@ -140,34 +169,85 @@ final class SiteSurvey {
 		return out;
 	}
 
-	/** The vehicle track into the launch paddock, as (east, north) points in metres. */
+	/** Level unit vector along the line of pads, engine axes (+X east, -Z north). */
+	Vector3f rowDirection() {
+		return new Vector3f((float) sin, 0, (float) -cos);
+	}
+
+	/** Level unit vector from the pads towards the spectators, engine axes. */
+	Vector3f spectatorDirection() {
+		return new Vector3f((float) cos, 0, (float) sin);
+	}
+
+	/** The vehicle track into the launch paddock, as (x, y) points in metres. */
 	double[][] track() {
-		return site.track();
+		double[][] points = new double[site.track().length][];
+		for (int i = 0; i < points.length; i++) {
+			points[i] = fromMap(site.track()[i][0], site.track()[i][1]);
+		}
+		return points;
 	}
 
 	/** Cropped paddocks the land cover does not show. */
 	List<Crop> crops() {
-		return site.crops();
+		List<Crop> crops = new ArrayList<>();
+		for (Crop crop : site.crops()) {
+			double[][] corners = new double[crop.corners().length][];
+			for (int i = 0; i < corners.length; i++) {
+				corners[i] = fromMap(crop.corners()[i][0], crop.corners()[i][1]);
+			}
+			double[] circle = null;
+			if (crop.circle() != null) {
+				double[] centre = fromMap(crop.circle()[0], crop.circle()[1]);
+				circle = new double[] { centre[0], centre[1], crop.circle()[2] };
+			}
+			crops.add(new Crop(crop.kind(), corners, circle));
+		}
+		return crops;
 	}
 
-	/** Half the width of the close land cover, metres. */
+	/** Half the width of the square round the pad that the close land cover fills, metres. */
 	double nearHalf() {
-		return site.nearHalf();
+		return inside(site.nearHalf());
 	}
 
-	/** Half the width of the far land cover and the heights, metres. */
+	/**
+	 * Half the width of the square round the pad that the far land cover and the heights fill,
+	 * metres: a whole number of 512 m, so the ground's squares meet its edge.
+	 */
 	double farHalf() {
-		return site.farHalf();
+		return Math.floor(inside(site.farHalf()) / 512) * 512;
+	}
+
+	/** Half the largest square in the site frame that fits in a grid of this half width. */
+	private double inside(double gridHalf) {
+		return (gridHalf - Math.max(Math.abs(padEast), Math.abs(padNorth))) / (Math.abs(sin) + Math.abs(cos));
 	}
 
 	/** Land cover class close to the launch area, from the finer data. */
-	int nearClass(double east, double north) {
-		return classAt(near, nearSize, site.nearHalf(), site.nearCell(), east, north);
+	int nearClass(double x, double y) {
+		return classAt(near, nearSize, site.nearHalf(), site.nearCell(), east(x, y), north(x, y));
 	}
 
 	/** Land cover class anywhere in the survey, from the coarser data. */
-	int farClass(double east, double north) {
-		return classAt(far, farSize, site.farHalf(), site.farCell(), east, north);
+	int farClass(double x, double y) {
+		return classAt(far, farSize, site.farHalf(), site.farCell(), east(x, y), north(x, y));
+	}
+
+	/** Metres east of the grids' centre of a point in the site frame. */
+	private double east(double x, double y) {
+		return padEast + x * sin - y * cos;
+	}
+
+	/** Metres north of the grids' centre of a point in the site frame. */
+	private double north(double x, double y) {
+		return padNorth + x * cos + y * sin;
+	}
+
+	/** A point given east and north of the grids' centre, in the site frame. */
+	private double[] fromMap(double east, double north) {
+		double de = east - padEast, dn = north - padNorth;
+		return new double[] { de * sin + dn * cos, -de * cos + dn * sin };
 	}
 
 	private static int classAt(byte[] grid, int size, double half, double cell, double east, double north) {
@@ -179,9 +259,9 @@ final class SiteSurvey {
 		return grid[y * size + x] & 0xFF;
 	}
 
-	/** Height of the ground above the launch area, metres. */
-	double height(double east, double north) {
-		return rawHeight(east, north) - padHeight;
+	/** Height of the ground above the main pad, metres. */
+	double height(double x, double y) {
+		return rawHeight(east(x, y), north(x, y)) - padHeight;
 	}
 
 	private double rawHeight(double east, double north) {
