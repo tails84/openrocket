@@ -3,7 +3,7 @@ package info.openrocket.swing.gui.figure3d.replay;
 import info.openrocket.core.document.OpenRocketDocument;
 import info.openrocket.core.document.Simulation;
 import info.openrocket.core.l10n.Translator;
-import info.openrocket.core.simulation.FlightDataBranch;
+import info.openrocket.core.simulation.FlightData;
 import info.openrocket.core.simulation.SimulationOptions;
 import info.openrocket.core.startup.Application;
 import info.openrocket.swing.gui.util.GUIUtil;
@@ -30,6 +30,8 @@ import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Window that plays back a simulated flight in 3D, with a timeline and live flight values.
@@ -55,34 +57,40 @@ public final class FlightReplayFrame extends JFrame {
 	 * @param simulation simulation with flight data
 	 */
 	public static void open(Window owner, OpenRocketDocument document, Simulation simulation) {
-		FlightReplayData data = null;
-		if (simulation.hasSimulationData() && simulation.getSimulatedData().getBranchCount() > 0) {
-			FlightDataBranch branch = simulation.getSimulatedData().getBranch(0);
-			try {
-				data = FlightReplayData.fromBranch(branch);
-			} catch (IllegalArgumentException e) {
-				data = null;
+		List<FlightReplayData> branches = new ArrayList<>();
+		if (simulation.hasSimulationData()) {
+			FlightData flightData = simulation.getSimulatedData();
+			for (int i = 0; i < flightData.getBranchCount(); i++) {
+				try {
+					branches.add(FlightReplayData.fromBranch(flightData.getBranch(i)));
+				} catch (IllegalArgumentException e) {
+					// The main branch must replay; a stage branch without position data is left out.
+					if (i == 0) {
+						break;
+					}
+				}
 			}
 		}
-		if (data == null) {
+		if (branches.isEmpty()) {
 			JOptionPane.showMessageDialog(owner, trans.get("FlightReplay.noData"),
 					trans.get("FlightReplay.title"), JOptionPane.INFORMATION_MESSAGE);
 			return;
 		}
-		FlightReplayFrame frame = new FlightReplayFrame(document, simulation, data);
+		FlightReplayFrame frame = new FlightReplayFrame(document, simulation, branches);
 		frame.setLocationRelativeTo(owner);
 		frame.setVisible(true);
 	}
 
-	private FlightReplayFrame(OpenRocketDocument document, Simulation simulation, FlightReplayData data) {
+	private FlightReplayFrame(OpenRocketDocument document, Simulation simulation, List<FlightReplayData> branches) {
 		super(trans.get("FlightReplay.title") + " - " + simulation.getName());
 		setDefaultCloseOperation(DISPOSE_ON_CLOSE);
 		GUIUtil.setWindowIcons(this);
 
 		SimulationOptions options = simulation.getOptions();
-		FlightReplayScene scene = new FlightReplayScene(data, document.getRocket(),
+		FlightReplayData data = branches.get(0);
+		FlightReplayScene scene = new FlightReplayScene(branches, document.getRocket(),
 				options.getLaunchRodLength(), options.getLaunchLatitude());
-		replayPanel = new FlightReplayPanel(document, data, scene);
+		replayPanel = new FlightReplayPanel(document, branches, scene);
 		readout = new FlightReplayReadout(data);
 		timeline = new FlightReplayTimeline(data, replayPanel.getStartTime(), replayPanel.getEndTime(),
 				replayPanel::seek);
@@ -111,16 +119,29 @@ public final class FlightReplayFrame extends JFrame {
 		cameraBox.addActionListener(e -> replayPanel.setCameraMode(
 				FlightReplayScene.CameraMode.values()[Math.max(0, cameraBox.getSelectedIndex())]));
 
-		JPanel controls = new JPanel(new MigLayout("fillx, insets 6 10 8 10", "[][]20[][]20[][]push[]"));
+		JComboBox<String> followBox = new JComboBox<>();
+		for (FlightReplayData branch : branches) {
+			followBox.addItem(branch.getName());
+		}
+		followBox.setFocusable(false);
+		followBox.addActionListener(e -> replayPanel.setFollowBody(Math.max(0, followBox.getSelectedIndex())));
+
+		JPanel controls = new JPanel(new MigLayout("fillx, insets 6 10 8 10", "[][]20[][]20[][]20[][]push[]"));
 		controls.add(playButton, "sg playback");
 		controls.add(restartButton, "sg playback");
 		controls.add(new JLabel(trans.get("FlightReplay.lbl.speed")));
 		controls.add(speedBox);
 		controls.add(new JLabel(trans.get("FlightReplay.lbl.camera")));
 		controls.add(cameraBox);
+		// Only staged flights have more than one thing to follow.
+		boolean staged = branches.size() > 1;
+		if (staged) {
+			controls.add(new JLabel(trans.get("FlightReplay.lbl.follow")));
+			controls.add(followBox);
+		}
 		JLabel hint = new JLabel(trans.get("FlightReplay.lbl.keys"));
 		hint.setEnabled(false);
-		controls.add(hint, "wmin 0, wrap");
+		controls.add(hint, staged ? "wmin 0, wrap" : "skip 2, wmin 0, wrap");
 		controls.add(timeline, "span, growx, h 90!");
 
 		// The playback keys work while the window has focus; controls do not take it.

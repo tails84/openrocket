@@ -14,6 +14,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Time-indexed view of one simulated flight branch for the flight replay: pose,
@@ -43,14 +44,20 @@ public final class FlightReplayData {
 			FlightEvent.Type.TUMBLE,
 			FlightEvent.Type.GROUND_HIT);
 
+	private static final double STEP_EPSILON = 1e-6;
+
 	/** Thrust below this is treated as no thrust, in newtons. */
 	private static final double THRUST_THRESHOLD = 0.01;
 
 	private final FlightPoseProvider pose;
+	private final String name;
+	private final UUID sourceComponentId;
+	private final double separationTime;
 	private final double[] time;
 	private final Map<FlightDataType, double[]> channels = new HashMap<>();
 	private final double[] rollAngle;
 	private final List<Event> events;
+	private final List<Event> allEvents;
 	private final List<Event> deployments;
 	private final double liftoffTime;
 	private final double railExitTime;
@@ -60,6 +67,9 @@ public final class FlightReplayData {
 
 	private FlightReplayData(FlightDataBranch branch) {
 		this.pose = FlightPoseProvider.fromFlightDataBranch(branch);
+		this.name = branch.getName();
+		this.sourceComponentId = branch.getSourceComponentId();
+		this.separationTime = branch.getSeparationTime();
 		this.time = toArray(branch.get(FlightDataType.TYPE_TIME));
 		for (FlightDataType type : branch.getTypes()) {
 			List<Double> values = branch.get(type);
@@ -73,6 +83,7 @@ public final class FlightReplayData {
 		this.rollAngle = integrate(time, channels.get(FlightDataType.TYPE_ROLL_RATE));
 
 		List<Event> marked = new ArrayList<>();
+		List<Event> all = new ArrayList<>();
 		List<Event> deployed = new ArrayList<>();
 		double liftoff = Double.NaN, railExit = Double.NaN, burnout = Double.NaN;
 		double apogee = Double.NaN, groundHit = Double.NaN;
@@ -87,6 +98,7 @@ public final class FlightReplayData {
 				case GROUND_HIT -> groundHit = Double.isNaN(groundHit) ? t : groundHit;
 				default -> { }
 			}
+			all.add(new Event(t, type, event.getSource()));
 			if (!MARKED_EVENTS.contains(type)) {
 				continue;
 			}
@@ -101,6 +113,7 @@ public final class FlightReplayData {
 			}
 		}
 		this.events = Collections.unmodifiableList(marked);
+		this.allEvents = Collections.unmodifiableList(all);
 		this.deployments = Collections.unmodifiableList(deployed);
 		this.liftoffTime = liftoff;
 		this.railExitTime = railExit;
@@ -126,6 +139,21 @@ public final class FlightReplayData {
 
 	public FlightPoseProvider getPose() {
 		return pose;
+	}
+
+	/** Branch name, normally the name of the stage it follows. */
+	public String getName() {
+		return name;
+	}
+
+	/** ID of the stage this branch follows after it separates. */
+	public UUID getSourceComponentId() {
+		return sourceComponentId;
+	}
+
+	/** Time this branch's stage separated from the rest of the rocket, or NaN for the main branch. */
+	public double getSeparationTime() {
+		return separationTime;
 	}
 
 	public double getStartTime() {
@@ -161,6 +189,31 @@ public final class FlightReplayData {
 		return interpolate(time, values, t);
 	}
 
+	/**
+	 * Returns how much a recorded value changes across the given time: the first value recorded
+	 * after it minus the last value recorded before it. Used for values that jump at an event.
+	 *
+	 * @return the change, or 0 when the type is not recorded or the time is outside the data
+	 */
+	public double getStepAcross(FlightDataType type, double t) {
+		double[] values = channels.get(type);
+		if (values == null) {
+			return 0;
+		}
+		int before = -1, after = -1;
+		for (int i = 0; i < time.length; i++) {
+			if (time[i] < t - STEP_EPSILON) {
+				before = i;
+			} else if (time[i] > t + STEP_EPSILON && after < 0) {
+				after = i;
+			}
+		}
+		if (before < 0 || after < 0) {
+			return 0;
+		}
+		return values[after] - values[before];
+	}
+
 	/** Rotation of the rocket about its own axis since the start of the data, in radians. */
 	public double getRollAngle(double t) {
 		return rollAngle == null ? 0.0 : interpolate(time, rollAngle, t);
@@ -174,6 +227,11 @@ public final class FlightReplayData {
 	/** Flight events to mark on a timeline, in time order. */
 	public List<Event> getEvents() {
 		return events;
+	}
+
+	/** Every event recorded for this branch, in time order, including motor and ejection events. */
+	public List<Event> getAllEvents() {
+		return allEvents;
 	}
 
 	/** Recovery device deployments, in time order. */

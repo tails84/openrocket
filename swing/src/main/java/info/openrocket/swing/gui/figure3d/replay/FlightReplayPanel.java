@@ -15,6 +15,7 @@ import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -48,20 +49,31 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 	private volatile boolean playing;
 	private volatile double rate = 1.0;
 	private volatile FlightReplayScene.CameraMode cameraMode = FlightReplayScene.CameraMode.CHASE;
+	private volatile int followBody;
 	private volatile double currentTime;
 
-	FlightReplayPanel(OpenRocketDocument document, FlightReplayData data, FlightReplayScene replayScene) {
+	/**
+	 * @param branches flight data branches; the first is the main rocket, the others are stages
+	 *                 that separated from it
+	 */
+	FlightReplayPanel(OpenRocketDocument document, List<FlightReplayData> branches, FlightReplayScene replayScene) {
 		super(new BorderLayout());
 		this.document = document;
 		this.replayScene = replayScene;
 		this.hasMotors = document.getSelectedConfiguration() != null
 				&& document.getSelectedConfiguration().hasMotors();
-		double end = data.getEndTime();
-		if (!Double.isNaN(data.getGroundHitTime())) {
+		FlightReplayData main = branches.get(0);
+		double end = main.getEndTime();
+		boolean landed = !Double.isNaN(main.getGroundHitTime());
+		for (FlightReplayData branch : branches) {
+			end = Math.max(end, branch.getEndTime());
+			landed |= !Double.isNaN(branch.getGroundHitTime());
+		}
+		if (landed) {
 			end += LANDING_HOLD_SECONDS;
 		}
-		this.clock = new PlaybackClock(data.getStartTime(), end);
-		this.currentTime = data.getStartTime();
+		this.clock = new PlaybackClock(main.getStartTime(), end);
+		this.currentTime = main.getStartTime();
 	}
 
 	// ---------- playback control (any thread) ----------
@@ -96,6 +108,12 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 
 	void setCameraMode(FlightReplayScene.CameraMode mode) {
 		this.cameraMode = mode;
+		requestRenderNow();
+	}
+
+	/** Chooses which flight branch the cameras follow: 0 for the main rocket. */
+	void setFollowBody(int body) {
+		this.followBody = body;
 		requestRenderNow();
 	}
 
@@ -160,7 +178,7 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 	private void initializeOnGlThread(Scene3DOrchestrator orchestrator) {
 		replayScene.install(orchestrator, hasMotors);
 		orchestrator.setRocketSceneRebuiltCallback(this::markDirty);
-		replayScene.apply(orchestrator, currentTime, cameraMode, 0f);
+		replayScene.apply(orchestrator, currentTime, cameraMode, followBody, 0f);
 	}
 
 	private void showFailure() {
@@ -252,7 +270,8 @@ final class FlightReplayPanel extends JPanel implements SharedCanvasRenderSchedu
 		Scene3DOrchestrator orchestrator = panel.getScene3DOrchestrator();
 		if (orchestrator != null) {
 			FlightReplayScene.CameraMode mode = cameraMode;
-			orchestrator.enqueueGlTask(() -> replayScene.apply(orchestrator, t, mode, frameSeconds));
+			int follow = followBody;
+			orchestrator.enqueueGlTask(() -> replayScene.apply(orchestrator, t, mode, follow, frameSeconds));
 		}
 		panel.render();
 	}
