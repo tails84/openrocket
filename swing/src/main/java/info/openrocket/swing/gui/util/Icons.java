@@ -272,6 +272,13 @@ public class Icons {
 					SVG_THEME_COLOR_RGB, SVG_DEFAULT_COLOR_KEY,
 					0x006cb6, "OR.icons.plot"
 			));
+	public static final Icon SIM_REPLAY = loadIcon(
+			"pix/icons/lucide/flight-replay.svg",
+			"Flight replay",
+			Map.of(
+					SVG_THEME_COLOR_RGB, SVG_DEFAULT_COLOR_KEY,
+					0x006cb6, "OR.icons.plot"
+			));
 	public static final Icon SIM_DISPERSION = loadSvgIcon(
 			"pix/icons/lucide/dispersion.svg",
 			"Landing dispersion",

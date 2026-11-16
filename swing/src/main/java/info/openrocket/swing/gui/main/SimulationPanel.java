@@ -76,6 +76,7 @@ import info.openrocket.core.util.AlphanumComparator;
 import info.openrocket.core.simulation.SimulationStepperMethod;
 import info.openrocket.core.util.StringUtils;
 import info.openrocket.swing.gui.components.CsvOptionPanel;
+import info.openrocket.swing.gui.figure3d.replay.FlightReplayFrame;
 import info.openrocket.swing.gui.simulation.LandingDispersionDialog;
 import info.openrocket.swing.gui.simulation.SimulationConfigDialog;
 import info.openrocket.swing.gui.util.ColorConversion;
@@ -118,6 +119,7 @@ public class SimulationPanel extends JPanel {
 	private final JButton landingDispersionButton;
 	private final JButton deleteButton;
 	private final JButton plotButton;
+	private final JButton flightReplayButton;
 	private final JButton simTableExportButton;
 	private final JPopupMenu pm;
 	private final ColumnVisibilityController columnVisibilityController;
@@ -130,6 +132,7 @@ public class SimulationPanel extends JPanel {
 	private final SimulationAction runSimulationAction;
 	private final SimulationAction landingDispersionAction;
 	private final SimulationAction plotSimulationAction;
+	private final SimulationAction flightReplayAction;
 	private final SimulationAction duplicateSimulationAction;
 	private final SimulationAction deleteSimulationAction;
 	private final SimulationAction simTableExportAction;
@@ -203,6 +206,7 @@ public class SimulationPanel extends JPanel {
 		runSimulationAction = new RunSimulationAction();
 		landingDispersionAction = new LandingDispersionAction();
 		plotSimulationAction = new PlotSimulationAction();
+		flightReplayAction = new FlightReplayAction();
 		duplicateSimulationAction = new DuplicateSimulationAction();
 		deleteSimulationAction = new DeleteSimulationAction();
 		simTableExportAction = new ExportSimulationTableAsCSVAction();
@@ -244,7 +248,13 @@ public class SimulationPanel extends JPanel {
 		//// Plot / export button
 		plotButton = new IconButton();
 		RocketActions.tieActionToButton(plotButton, plotSimulationAction, trans.get("simpanel.but.plotexport"));
-		this.add(plotButton, "wrap para");
+		this.add(plotButton, "gapright para");
+
+		//// Flight replay button
+		flightReplayButton = new IconButton();
+		RocketActions.tieActionToButton(flightReplayButton, flightReplayAction, trans.get("simpanel.but.flightReplay"));
+		flightReplayButton.setToolTipText(trans.get("simpanel.but.ttip.flightReplay"));
+		this.add(flightReplayButton, "wrap para");
 
 		//// Run then Dump simulations
 		simTableExportButton = new IconButton();
@@ -287,6 +297,7 @@ public class SimulationPanel extends JPanel {
 		pm.add(runSimulationAction);
 		pm.add(landingDispersionAction);
 		pm.add(plotSimulationAction);
+		pm.add(flightReplayAction);
 		pm.add(selectedSimsExportAction);
 
 		ApplicationPreferences appPreferences = (ApplicationPreferences) Application.getPreferences();
@@ -526,6 +537,20 @@ public class SimulationPanel extends JPanel {
 		takeTheSpotlight();
 
 		openDialog(true, sim);
+	}
+
+	private void replaySimulation() {
+		Simulation[] simulations = getSelectedSimulations();
+		if (simulations == null || simulations.length != 1) {
+			return;
+		}
+		Simulation sim = simulations[0];
+		Window window = SwingUtilities.getWindowAncestor(SimulationPanel.this);
+		if (!sim.hasSimulationData()) {
+			new SimulationRunDialog(window, document, sim).setVisible(true);
+		}
+		FlightReplayFrame.open(window, document, sim);
+		takeTheSpotlight();
 	}
 
 	private void deleteSimulations(Simulation[] sims) {
@@ -862,6 +887,7 @@ public class SimulationPanel extends JPanel {
 		runSimulationAction.updateEnabledState();
 		landingDispersionAction.updateEnabledState();
 		plotSimulationAction.updateEnabledState();
+		flightReplayAction.updateEnabledState();
 		simTableExportAction.updateEnabledState();
 		selectedSimsExportAction.updateEnabledState();
 	}
@@ -1232,6 +1258,24 @@ public class SimulationPanel extends JPanel {
 		@Override
 		public void actionPerformed(ActionEvent e) {
 			plotSimulation();
+		}
+
+		@Override
+		public void updateEnabledState() {
+			this.setEnabled(simulationTable.getSelectedRowCount() == 1 && hasValidConfig);
+		}
+	}
+
+	class FlightReplayAction extends SimulationAction {
+		public FlightReplayAction() {
+			this.putValue(NAME, trans.get("simpanel.pop.flightReplay"));
+			this.putValue(SHORT_DESCRIPTION, trans.get("simpanel.pop.flightReplay.ttip"));
+			this.putValue(SMALL_ICON, Icons.SIM_REPLAY);
+		}
+
+		@Override
+		public void actionPerformed(ActionEvent e) {
+			replaySimulation();
 		}
 
 		@Override
