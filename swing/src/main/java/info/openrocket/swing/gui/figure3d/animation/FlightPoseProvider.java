@@ -12,17 +12,29 @@ import java.util.List;
  * Samples a {@link FlightDataBranch} as an engine-space position and orientation.
  * Position uses east, north, and altitude data; orientation uses theta and phi
  * when available and otherwise follows the sampled velocity.
+ *
+ * <p>The simulation stores theta as the elevation of the rocket axis above the
+ * horizon and phi, like the lateral position direction, as a bearing measured
+ * clockwise from north (see {@code SimulationStatus.storeData()}).</p>
  */
 public final class FlightPoseProvider implements PoseProvider {
 	private final double[] t;
 	private final double[] east, north, alt;
-	private final double[] thetaZenith;     // optional
-	private final double[] phiAzimuth;      // optional
+	// Engine-space unit vectors of the rocket axis, or null to follow the velocity.
+	// Interpolating vectors avoids the jump where the bearing wraps through north.
+	private final float[] axisX, axisY, axisZ;
 
 	private FlightPoseProvider(double[] t, double[] east, double[] north, double[] alt,
-							   double[] thetaZenith, double[] phiAzimuth) {
+							   double[] elevation, double[] bearing) {
 		this.t = t; this.east = east; this.north = north; this.alt = alt;
-		this.thetaZenith = thetaZenith; this.phiAzimuth = phiAzimuth;
+		if (elevation != null && bearing != null) {
+			axisX = new float[t.length];
+			axisY = new float[t.length];
+			axisZ = new float[t.length];
+			fillAxis(elevation, bearing);
+		} else {
+			axisX = axisY = axisZ = null;
+		}
 	}
 
 	// ---------- Factory ----------
@@ -37,15 +49,15 @@ public final class FlightPoseProvider implements PoseProvider {
 
 		if (eastL == null || northL == null) {
 			List<Double> rXY  = branch.get(FlightDataType.TYPE_POSITION_XY);
-			List<Double> dirL = branch.get(FlightDataType.TYPE_POSITION_DIRECTION); // azimuth from east, radians
+			List<Double> dirL = branch.get(FlightDataType.TYPE_POSITION_DIRECTION); // bearing from north, clockwise
 			if (rXY != null && dirL != null) {
 				eastL  = new ArrayList<>(rXY.size());
 				northL = new ArrayList<>(rXY.size());
 				for (int i = 0; i < Math.min(rXY.size(), dirL.size()); i++) {
 					double r = nz(rXY.get(i));
-					double th = nz(dirL.get(i)); // measured from east CCW -> engine x/z mapping below
-					eastL.add(r * Math.cos(th));
-					northL.add(r * Math.sin(th));
+					double bearing = nz(dirL.get(i));
+					eastL.add(r * Math.sin(bearing));
+					northL.add(r * Math.cos(bearing));
 				}
 			}
 		}
@@ -58,8 +70,8 @@ public final class FlightPoseProvider implements PoseProvider {
 		if (altL == null) throw new IllegalArgumentException("FlightDataBranch lacks altitude channel");
 
 		// Optional orientation
-		List<Double> thetaL = branch.get(FlightDataType.TYPE_ORIENTATION_THETA); // 0 = up
-		List<Double> phiL   = branch.get(FlightDataType.TYPE_ORIENTATION_PHI);   // azimuth from east, CCW
+		List<Double> thetaL = branch.get(FlightDataType.TYPE_ORIENTATION_THETA); // elevation, pi/2 = up
+		List<Double> phiL   = branch.get(FlightDataType.TYPE_ORIENTATION_PHI);   // bearing from north, clockwise
 
 		// Length align (defensive)
 		int n = minLen(tL, eastL, northL, altL);
@@ -87,15 +99,21 @@ public final class FlightPoseProvider implements PoseProvider {
 
 	@Override
 	public Quaternionf getOrientation(double time) {
-		// Preferred: explicit zenith/azimuth
-		if (thetaZenith != null && phiAzimuth != null) {
-			float th = sample(t, thetaZenith, time); // 0 = up (+Y)
-			float ph = sample(t, phiAzimuth,  time); // 0 = +X (east), CCW towards +Z in OR -> -Z in engine
-			Vector3f horiz = new Vector3f((float)Math.cos(ph), 0f, (float)-Math.sin(ph)); // -Z for engine
-			Vector3f dir = new Vector3f(horiz).mul((float)Math.sin(th))
-					.add(0f, (float)Math.cos(th), 0f)
-					.normalize();
-			return new Quaternionf().rotateTo(new Vector3f(0,1,0), dir);
+		Vector3f dir = getAxisDirection(time);
+		if (dir == null) return new Quaternionf(); // no rotation
+		return new Quaternionf().rotateTo(new Vector3f(0,1,0), dir);
+	}
+
+	/**
+	 * Returns the engine-space unit vector the rocket nose points along at the given time,
+	 * or {@code null} when neither orientation data nor a usable velocity is available.
+	 */
+	public Vector3f getAxisDirection(double time) {
+		if (axisX != null) {
+			Vector3f dir = new Vector3f(sample(t, axisX, time), sample(t, axisY, time), sample(t, axisZ, time));
+			if (dir.lengthSquared() > 1e-12f) {
+				return dir.normalize();
+			}
 		}
 
 		// Fallback: face the velocity (central difference of position)
@@ -103,15 +121,34 @@ public final class FlightPoseProvider implements PoseProvider {
 		Vector3f p0 = getPosition(Math.max(getStartTime(), time - eps));
 		Vector3f p1 = getPosition(Math.min(getEndTime(),   time + eps));
 		Vector3f v = p1.sub(p0, new Vector3f());
-		if (v.lengthSquared() < 1e-12f) return new Quaternionf(); // no rotation
-		v.normalize();
-		return new Quaternionf().rotateTo(new Vector3f(0,1,0), v);
+		if (v.lengthSquared() < 1e-12f) return null;
+		return v.normalize();
 	}
 
 	@Override public double getStartTime() { return t[0]; }
 	@Override public double getEndTime()   { return t[t.length - 1]; }
 
 	// ---------- helpers ----------
+	private void fillAxis(double[] elevation, double[] bearing) {
+		float lastX = Float.NaN, lastY = Float.NaN, lastZ = Float.NaN;
+		for (int i = 0; i < t.length; i++) {
+			double el = elevation[i], br = bearing[i];
+			if (Double.isFinite(el) && Double.isFinite(br)) {
+				// Engine axes: +X east, +Y up, -Z north
+				lastX = (float) (Math.cos(el) * Math.sin(br));
+				lastY = (float) Math.sin(el);
+				lastZ = (float) (-Math.cos(el) * Math.cos(br));
+			}
+			axisX[i] = lastX; axisY[i] = lastY; axisZ[i] = lastZ;
+		}
+		// Samples before the first finite reading take that reading.
+		int first = 0;
+		while (first < t.length && Float.isNaN(axisX[first])) first++;
+		for (int i = 0; i < first && first < t.length; i++) {
+			axisX[i] = axisX[first]; axisY[i] = axisY[first]; axisZ[i] = axisZ[first];
+		}
+	}
+
 	private static int minLen(List<?>... lists) {
 		int n = Integer.MAX_VALUE;
 		for (List<?> l : lists) n = Math.min(n, l.size());
@@ -132,6 +169,17 @@ public final class FlightPoseProvider implements PoseProvider {
 		int hi = upperBound(ts, t);
 		if (hi <= 0) return (float)vs[0];
 		if (hi >= ts.length) return (float)vs[ts.length - 1];
+		int lo = hi - 1;
+		double a = ts[lo], b = ts[hi];
+		double u = (t - a) / Math.max(1e-9, (b - a));
+		return (float)((1.0 - u) * vs[lo] + u * vs[hi]);
+	}
+
+	private static float sample(double[] ts, float[] vs, double t) {
+		if (t <= ts[0]) return vs[0];
+		int hi = upperBound(ts, t);
+		if (hi <= 0) return vs[0];
+		if (hi >= ts.length) return vs[ts.length - 1];
 		int lo = hi - 1;
 		double a = ts[lo], b = ts[hi];
 		double u = (t - a) / Math.max(1e-9, (b - a));
