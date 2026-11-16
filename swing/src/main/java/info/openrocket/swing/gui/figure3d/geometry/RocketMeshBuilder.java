@@ -314,7 +314,8 @@ public final class RocketMeshBuilder {
 				@SuppressWarnings("unchecked")
 				RocketSceneSnapshot.MotorInstance motor = collectMotor(fcid,
 						(RocketComponent & MotorMount) component, instanceLocation, instanceAngle,
-						worldScale, motorMesh, context, lowestMotorInstances);
+						worldScale, motorMesh, context,
+						config.getVisualEffects().isExhaustOnAllMotors() ? null : lowestMotorInstances);
 				if (motor != null) {
 					motorInstances.add(motor);
 				}
@@ -325,6 +326,9 @@ public final class RocketMeshBuilder {
 	/**
 	 * Captures all data required to build a single motor instance scene object and (optionally)
 	 * its exhaust particle emitter. Pure CPU; safe to call on the EDT.
+	 */
+	/**
+	 * @param lowestMotorInstances motors that get exhaust, or null to give every motor exhaust
 	 */
 	private static <T extends RocketComponent & MotorMount> RocketSceneSnapshot.MotorInstance collectMotor(
 			FlightConfigurationId fcid, T mount, CoordinateIF mountLocation, CoordinateIF mountAngle,
@@ -360,7 +364,7 @@ public final class RocketMeshBuilder {
 				.scale(worldScale);
 
 		RocketSceneSnapshot.ParticleEmitterPlan emitterPlan = null;
-		if (isLowestMotorInstance(lowestMotorInstances, mount, context)) {
+		if (lowestMotorInstances == null || isLowestMotorInstance(lowestMotorInstances, mount, context)) {
 			emitterPlan = new RocketSceneSnapshot.ParticleEmitterPlan(
 					new Vector3f(positionInEngineCS), rotationMatrix, motor, worldScale);
 		}

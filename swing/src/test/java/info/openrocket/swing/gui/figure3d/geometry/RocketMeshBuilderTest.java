@@ -72,6 +72,21 @@ class RocketMeshBuilderTest extends BaseTestCase {
 	}
 
 	@Test
+	void onlyBottomMotorsGetExhaustUnlessEveryMotorIsAsked() {
+		Rocket rocket = TestRockets.makeMultiStageEventTestRocket();
+		RenderingConfiguration config = new RenderingConfiguration();
+
+		long bottomOnly = RocketMeshBuilder.buildSnapshot(rocket, config).getMotorInstances().stream()
+				.filter(motor -> motor.particleEmitterPlan() != null).count();
+		config.getVisualEffects().setExhaustOnAllMotors(true);
+		List<RocketSceneSnapshot.MotorInstance> motors = RocketMeshBuilder.buildSnapshot(rocket, config)
+				.getMotorInstances();
+
+		assertTrue(bottomOnly < motors.size(), "the sustainer motor sits above the bottom of the stack");
+		assertTrue(motors.stream().allMatch(motor -> motor.particleEmitterPlan() != null));
+	}
+
+	@Test
 	void separateTubeAppearancePartitionsOuterInnerAndEdgeSurfaces() {
 		Rocket rocket = TestRockets.makeEstesAlphaIII();
 		BodyTube tube = rocket.getAllChildren().stream()

@@ -22,6 +22,7 @@ public class VisualEffectsSettings {
 	public static final float DEFAULT_AMBIENT_LIGHT_FACTOR = 0.1f;
 	public static final boolean DEFAULT_PARTICLE_EFFECTS_ENABLED = true;
 	public static final boolean DEFAULT_STATIC_PARTICLES = true;
+	public static final boolean DEFAULT_EXHAUST_ON_ALL_MOTORS = false;
 	public static final float DEFAULT_PARTICLE_TIME = 10.0f;
 	public static final boolean DEFAULT_SPARK_PARTICLES_ENABLED = true;
 	public static final boolean DEFAULT_SMOKE_PARTICLES_ENABLED = true;
@@ -60,6 +61,7 @@ public class VisualEffectsSettings {
 	// Global particle settings
 	private boolean particleEffectsEnabled = DEFAULT_PARTICLE_EFFECTS_ENABLED;
 	private boolean staticParticles = DEFAULT_STATIC_PARTICLES;
+	private boolean exhaustOnAllMotors = DEFAULT_EXHAUST_ON_ALL_MOTORS;
 	private float particleTime = DEFAULT_PARTICLE_TIME;
 
 	// Individual particle type settings
@@ -173,6 +175,18 @@ public class VisualEffectsSettings {
 
 	public void setStaticParticles(boolean staticParticles) {
 		this.staticParticles = staticParticles;
+	}
+
+	/**
+	 * Whether every motor gets exhaust emitters. By default only the motors at the bottom of the
+	 * stack do, the ones that burn on the pad; a flight replay also needs the upper stages.
+	 */
+	public boolean isExhaustOnAllMotors() {
+		return exhaustOnAllMotors;
+	}
+
+	public void setExhaustOnAllMotors(boolean exhaustOnAllMotors) {
+		this.exhaustOnAllMotors = exhaustOnAllMotors;
 	}
 
 	public float getParticleTime() {
@@ -327,6 +341,7 @@ public class VisualEffectsSettings {
 		ambientLightFactor = DEFAULT_AMBIENT_LIGHT_FACTOR;
 		particleEffectsEnabled = DEFAULT_PARTICLE_EFFECTS_ENABLED;
 		staticParticles = DEFAULT_STATIC_PARTICLES;
+		exhaustOnAllMotors = DEFAULT_EXHAUST_ON_ALL_MOTORS;
 		particleTime = DEFAULT_PARTICLE_TIME;
 		sparkParticlesEnabled = DEFAULT_SPARK_PARTICLES_ENABLED;
 		smokeParticlesEnabled = DEFAULT_SMOKE_PARTICLES_ENABLED;
