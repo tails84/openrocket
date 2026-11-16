@@ -138,11 +138,12 @@ class FlightReplayTest extends BaseTestCase {
 		assertEquals(expected.y, tip.y, 1e-3f);
 		assertEquals(expected.z, tip.z, 1e-3f);
 
-		// The aft end rests just above the ground, which is at zero height in the site frame.
+		// The aft end rests on the rail stop just above the pad's blast deflector; the ground is at
+		// zero height in the site frame.
 		FinSet fins = first(rocket, FinSet.class);
 		double length = rocket.getSelectedConfiguration().getBoundingBox().max.getX();
 		float aftHeight = sitePoint(scene, fins, start, length).y / S;
-		assertTrue(aftHeight >= 0 && aftHeight < 0.05, "aft end height " + aftHeight);
+		assertEquals(LaunchSite.PLATE_HEIGHT + LaunchSite.TAIL_STANDOFF, aftHeight, 0.01, "aft end height");
 	}
 
 	@Test

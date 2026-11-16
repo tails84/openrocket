@@ -16,77 +16,7 @@ import java.util.List;
 final class ReplayMeshes {
 	private static final int OUTSIDE = RenderingConstants.SURFACE_ID_OUTSIDE;
 
-	/**
-	 * Square rings of ground tiles: tile size and ring extent in metres. Tiles grow with
-	 * distance so the checker keeps giving a sense of height without shimmering far away.
-	 */
-	private static final double[][] GROUND_RINGS = {
-			// tile size, outer half-width
-			{ 2.0, 30.0 },
-			{ 5.0, 100.0 },
-			{ 20.0, 600.0 },
-			{ 100.0, 3_000.0 },
-			{ 500.0, 20_000.0 },
-	};
-
 	private ReplayMeshes() {
-	}
-
-	/**
-	 * Builds one colour of a checkered ground plane centred on the launch site.
-	 *
-	 * @param parity 0 or 1, selecting the tiles of one colour; the two parities never overlap
-	 */
-	static Mesh groundTiles(int parity) {
-		List<Vertex> vertices = new ArrayList<>();
-		IntList indices = new IntList();
-		double inner = 0.0;
-		for (double[] ring : GROUND_RINGS) {
-			double size = ring[0];
-			double outer = ring[1];
-			int n = (int) Math.round(outer / size);
-			for (int i = -n; i < n; i++) {
-				for (int j = -n; j < n; j++) {
-					double x0 = i * size, z0 = j * size;
-					boolean insideInnerRing = x0 >= -inner && x0 + size <= inner && z0 >= -inner && z0 + size <= inner;
-					if (insideInnerRing || Math.floorMod(i + j, 2) != parity) {
-						continue;
-					}
-					addGroundQuad(vertices, indices, x0, z0, size);
-				}
-			}
-			inner = outer;
-		}
-		return new Mesh(vertices, indices);
-	}
-
-	private static void addGroundQuad(List<Vertex> vertices, IntList indices, double x0, double z0, double size) {
-		float s = RenderingConstants.WORLD_SCALE;
-		int base = vertices.size();
-		Vector3f up = new Vector3f(0, 1, 0);
-		vertices.add(vertex((float) (x0 * s), 0, (float) (z0 * s), up));
-		vertices.add(vertex((float) ((x0 + size) * s), 0, (float) (z0 * s), up));
-		vertices.add(vertex((float) ((x0 + size) * s), 0, (float) ((z0 + size) * s), up));
-		vertices.add(vertex((float) (x0 * s), 0, (float) ((z0 + size) * s), up));
-		// Counter-clockwise seen from above.
-		indices.addTriangle(base, base + 2, base + 1);
-		indices.addTriangle(base, base + 3, base + 2);
-	}
-
-	/** Flat disc in the XZ plane facing +Y. */
-	static Mesh disc(float radius, int segments) {
-		List<Vertex> vertices = new ArrayList<>();
-		IntList indices = new IntList();
-		Vector3f up = new Vector3f(0, 1, 0);
-		vertices.add(vertex(0, 0, 0, up));
-		for (int i = 0; i <= segments; i++) {
-			double a = 2 * Math.PI * i / segments;
-			vertices.add(vertex((float) (radius * Math.cos(a)), 0, (float) (radius * Math.sin(a)), up));
-		}
-		for (int i = 1; i <= segments; i++) {
-			indices.addTriangle(0, i + 1, i);
-		}
-		return new Mesh(vertices, indices);
 	}
 
 	/** Open cylinder of radius 1 from y = 0 to y = 1, to be scaled into lines and rods. */

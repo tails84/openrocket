@@ -80,10 +80,6 @@ final class FlightReplayScene {
 	// sRGB colours. Trail and canopy use the Okabe-Ito palette.
 	private static final Vector3f SKY_TOP = new Vector3f(0.34f, 0.55f, 0.84f);
 	private static final Vector3f SKY_HAZE = new Vector3f(0.80f, 0.86f, 0.92f);
-	private static final Vector3f GRASS_LIGHT = new Vector3f(0.44f, 0.58f, 0.31f);
-	private static final Vector3f GRASS_DARK = new Vector3f(0.37f, 0.50f, 0.26f);
-	private static final Vector3f CONCRETE = new Vector3f(0.62f, 0.62f, 0.60f);
-	private static final Vector3f RAIL_METAL = new Vector3f(0.78f, 0.79f, 0.81f);
 	private static final Vector3f TRAIL_ASCENT = new Vector3f(0.902f, 0.624f, 0.0f);	// orange
 	private static final Vector3f TRAIL_DESCENT = new Vector3f(0.337f, 0.706f, 0.914f);	// sky blue
 	private static final Vector3f CANOPY_DEFAULT = new Vector3f(0.835f, 0.369f, 0.0f);	// vermillion
@@ -91,8 +87,10 @@ final class FlightReplayScene {
 	private static final Vector3f SHROUD_LINE = new Vector3f(0.25f, 0.25f, 0.25f);
 	private static final Vector3f MEASURED = new Vector3f(0.800f, 0.475f, 0.655f);	// reddish purple
 	private static final float MEASURED_OPACITY = 0.55f;
-	/** Least distance between neighbouring pads, metres. */
-	private static final double PAD_SPACING = 1;
+	/** Least distance between neighbouring pads, metres; close enough that the chase view shows two rockets. */
+	private static final double PAD_SPACING = 1.3;
+	/** Body radius up to which the rocket flies off a 1010 rail rather than a 1515, metres. */
+	private static final double SMALL_RAIL_RADIUS = 0.04;
 
 	/** Follow value that puts the cameras on the measured flight. */
 	static final int FOLLOW_MEASURED = -1;
@@ -141,8 +139,10 @@ final class FlightReplayScene {
 	private final double launchCg;
 	private final double launchCgHeight;
 	private final Vector3f launchAxis;
-	private final double railLength;
 	private final double launchLatitude;
+	private final LaunchSite site;
+	/** Where the main pad stands, under the rocket's aft end, engine units. */
+	private final Vector3f padCentre;
 
 	private final Map<SceneObject, Matrix4f> baseTransforms = new IdentityHashMap<>();
 	private final Map<SceneObject, Part> parts = new IdentityHashMap<>();
@@ -167,7 +167,6 @@ final class FlightReplayScene {
 	 * @param launchLatitude launch site latitude, degrees
 	 */
 	FlightReplayScene(List<FlightReplayData> branches, Rocket rocket, double railLength, double launchLatitude) {
-		this.railLength = railLength;
 		this.launchLatitude = launchLatitude;
 		FlightReplayData mainData = branches.get(0);
 		for (int i = 1; i < branches.size(); i++) {
@@ -209,8 +208,9 @@ final class FlightReplayScene {
 		this.launchCg = Double.isFinite(cg) ? cg : bounds.min.getX() + 0.5 * length;
 		Vector3f axis = mainData.getPose().getAxisDirection(mainData.getStartTime());
 		this.launchAxis = axis != null ? axis : new Vector3f(0, 1, 0);
-		// The aft end rests on the pad: the CG sits this high above the ground at launch.
-		this.launchCgHeight = (bounds.max.getX() - launchCg) * launchAxis.y + 0.02;
+		// The aft end rests just above the pad's blast deflector: the CG sits this high above the ground.
+		this.launchCgHeight = (bounds.max.getX() - launchCg) * launchAxis.y
+				+ LaunchSite.PLATE_HEIGHT + LaunchSite.TAIL_STANDOFF;
 
 		for (int i = 0; i < count; i++) {
 			FlightReplayData data = branches.get(i);
@@ -227,6 +227,25 @@ final class FlightReplayScene {
 					launchCgHeight, launchAxis));
 		}
 		this.main = bodies.get(0);
+
+		// The site is laid out about the main pad, under the rocket's aft end.
+		Vector3f tail = new Vector3f(launchAxis).mul((float) (-(length - launchCg) * S));
+		this.padCentre = new Vector3f(tail.x, 0, tail.z);
+		Vector3f observer = observerDirection();
+		Vector3f row = new Vector3f(observer.z, 0, -observer.x);
+		List<double[]> landings = new ArrayList<>();
+		for (FlightReplayData data : branches) {
+			if (!Double.isNaN(data.getGroundHitTime())) {
+				Vector3f at = data.getPose().getPosition(data.getGroundHitTime()).sub(padCentre).div(S);
+				landings.add(new double[] { at.dot(row), at.dot(observer) });
+			}
+		}
+		double railWidth = bodyRadius <= SMALL_RAIL_RADIUS ? 0.0254 : 0.0381;
+		double liftoff = Double.isNaN(mainData.getLiftoffTime()) ? mainData.getStartTime() : mainData.getLiftoffTime();
+		this.site = new LaunchSite(row, observer, sunDirection(), Math.max(PAD_SPACING, 1.25 * length), launchAxis,
+				Math.max(railLength, 0.3), railWidth, bodyRadius + LaunchSite.BUTTON_HEIGHT + railWidth / 2,
+				mainData.getValue(FlightDataType.TYPE_WIND_DIRECTION, liftoff),
+				mainData.getValue(FlightDataType.TYPE_WIND_VELOCITY, liftoff), landings);
 	}
 
 	// ---------- rocket geometry ----------
@@ -323,9 +342,10 @@ final class FlightReplayScene {
 		configureSun(scene);
 		configureCamera(orchestrator);
 
-		addSiteObject(scene, ReplayMeshes.groundTiles(0), GRASS_LIGHT);
-		addSiteObject(scene, ReplayMeshes.groundTiles(1), GRASS_DARK);
-		addPadAndRail(scene, new Vector3f());
+		for (LaunchSite.Piece piece : site.build()) {
+			SceneObject object = addSiteObject(scene, piece.mesh(), piece.appearance());
+			object.getModelMatrix().translation(padCentre);
+		}
 		for (int i = 0; i < bodies.size(); i++) {
 			ReplayBody body = bodies.get(i);
 			double start = i == 0 ? body.getData().getLiftoffTime() : body.getSeparationTime();
@@ -335,17 +355,21 @@ final class FlightReplayScene {
 		}
 	}
 
+	/** Mid-morning sun on the equator side of the launch site, 50 degrees up. */
+	private Vector3f sunDirection() {
+		double elevation = Math.toRadians(50);
+		double bearing = Math.toRadians(launchLatitude < 0 ? 30 : 150);
+		return new Vector3f(
+				(float) (Math.cos(elevation) * Math.sin(bearing)),
+				(float) Math.sin(elevation),
+				(float) (-Math.cos(elevation) * Math.cos(bearing)));
+	}
+
 	private void configureSun(Scene scene) {
 		if (scene.getLightController().getLights().isEmpty()) {
 			return;
 		}
-		// Mid-morning sun on the equator side of the launch site, 50 degrees up.
-		double elevation = Math.toRadians(50);
-		double bearing = Math.toRadians(launchLatitude < 0 ? 30 : 150);
-		Vector3f toSun = new Vector3f(
-				(float) (Math.cos(elevation) * Math.sin(bearing)),
-				(float) Math.sin(elevation),
-				(float) (-Math.cos(elevation) * Math.cos(bearing)));
+		Vector3f toSun = sunDirection();
 		Light sun = scene.getLightController().getLight(0);
 		sun.setDirection(-toSun.x, -toSun.y, -toSun.z);
 		sun.setColor(1.0f, 0.97f, 0.92f);
@@ -359,24 +383,6 @@ final class FlightReplayScene {
 		camera.setPitchClampingEnabled(false);
 		camera.setForceFixedUp(false);
 		orchestrator.getCameraController().setZoomFitting(false);
-	}
-
-	/** Adds a pad and rail with its centre {@code offset} engine units from the launch site's origin. */
-	private List<SceneObject> addPadAndRail(Scene scene, Vector3f offset) {
-		Vector3f tail = new Vector3f(0, (float) (launchCgHeight * S), 0)
-				.sub(new Vector3f(launchAxis).mul((float) (length - launchCg) * S)).add(offset);
-		SceneObject plate = addSiteObject(scene, ReplayMeshes.disc((float) Math.max(0.25, 3 * bodyRadius) * S, 32),
-				CONCRETE);
-		plate.getModelMatrix().translate(tail.x, 0.03f * S, tail.z);
-
-		// The rail stands on the far side of the rocket from the default chase view.
-		SceneObject rail = addSiteObject(scene, ReplayMeshes.unitCylinder(8), RAIL_METAL);
-		Vector3f railBase = new Vector3f(tail.x, 0, tail.z - (float) (bodyRadius + 0.012) * S);
-		rail.getModelMatrix()
-				.translate(railBase)
-				.rotate(new Quaternionf().rotateTo(new Vector3f(0, 1, 0), launchAxis))
-				.scale(0.01f * S, (float) Math.max(railLength, 0.1) * S, 0.01f * S);
-		return List.of(plate, rail);
 	}
 
 	private List<SceneObject> addTrail(Scene scene, ReplayBody body, double start, Appearance3D ascent,
@@ -472,14 +478,6 @@ final class FlightReplayScene {
 		pendingMeasured.set(measured);
 	}
 
-	/** The measured flight lifts off from the next pad along the line, as seen by the observer. */
-	private Vector3f measuredPadOffset() {
-		Vector3f side = observerDirection();
-		// Close enough that the chase view shows both rockets on their pads.
-		double spacing = Math.max(PAD_SPACING, 1.2 * length);
-		return new Vector3f(side.z, 0, -side.x).mul((float) (spacing * S));
-	}
-
 	/** Adds the measured flight's rocket, pad, trail, canopies and cords. Runs on the GL thread. */
 	private void installMeasured(Scene scene, FlightReplayData measured) {
 		removeMeasured(scene);
@@ -492,8 +490,8 @@ final class FlightReplayScene {
 		}
 		ReplayBody body = new ReplayBody(measured, main.getFront(), main.getAft(), main.getRadius(), devices,
 				launchCgHeight, launchAxis);
-		Vector3f padOffset = measuredPadOffset();
-		body.setSiteOffset(padOffset);
+		// It lifts off from the next pad along.
+		body.setSiteOffset(site.padPosition(1));
 		Ghost added = new Ghost(body);
 
 		// A copy of every part that flies with the main rocket.
@@ -515,7 +513,6 @@ final class FlightReplayScene {
 					device));
 			added.bases.put(copy, new Matrix4f(base));
 		}
-		added.objects.addAll(addPadAndRail(scene, padOffset));
 		added.objects.addAll(addTrail(scene, body, measured.getLiftoffTime(), unlit(MEASURED), unlit(MEASURED)));
 		added.objects.addAll(addCanopies(scene, body, MEASURED, MEASURED_OPACITY));
 		added.objects.addAll(addCords(scene, body));
@@ -575,8 +572,8 @@ final class FlightReplayScene {
 		return new Vector3f(paint.getRed() / 255f, paint.getGreen() / 255f, paint.getBlue() / 255f);
 	}
 
-	private SceneObject addSiteObject(Scene scene, Mesh mesh, Vector3f color) {
-		SceneObject object = new SceneObject(mesh, new Vector3f(), unlit(color));
+	private SceneObject addSiteObject(Scene scene, Mesh mesh, Appearance3D appearance) {
+		SceneObject object = new SceneObject(mesh, new Vector3f(), appearance);
 		object.setSelectable(false);
 		scene.addObject(object);
 		siteObjects.add(object);
